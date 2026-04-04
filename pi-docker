@@ -35,12 +35,47 @@ USAGE
     exit 0
 }
 
-# Resolve a host binary and all its shared library dependencies.
-# Outputs one absolute path per line (deduplicated externally).
-# Second arg "_shebang" prevents recursive shebang chasing.
+# Collect shared library paths for an ELF binary (one per line).
+# Skips virtual libraries (vdso, linux-gate). Resolves symlinks.
+collect_elf_libs() {
+    local elf_path="$1"
+    ldd "$elf_path" 2>/dev/null | while read -r line; do
+        case "$line" in *linux-vdso*|*linux-gate*) continue ;; esac
+        local lib_path=""
+        if echo "$line" | grep -qE "=> /.+ \(0x"; then
+            lib_path="$(echo "$line" | sed -E 's/.*=> (\/[^ ]+) \(0x.*/\1/')"
+        elif echo "$line" | grep -qE "^\s*/"; then
+            lib_path="$(echo "$line" | sed -E 's/^\s*(\/[^ ]+).*/\1/')"
+        fi
+        if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
+            readlink -f "$lib_path"
+        fi
+    done
+}
+
+# Detect runtime directories a tool needs beyond its binary and .so deps.
+# Output: one "DIR:<path>" line per directory to mount at its original path.
+detect_runtime_dirs() {
+    local real_path="$1"
+    local libs="$2"
+    # Python: if it links libpythonX.Y, mount the stdlib directory
+    local pyver
+    pyver="$(echo "$libs" | grep -oP 'libpython\K[0-9]+\.[0-9]+' | head -1)" || true
+    if [ -n "$pyver" ]; then
+        local pylib="/usr/lib/python${pyver}"
+        [ -d "$pylib" ] && echo "DIR:${pylib}"
+        local pydynload="/usr/lib/python${pyver}/lib-dynload"
+        [ -d "$pydynload" ] && echo "DIR:${pydynload}"
+    fi
+}
+
+# Resolve a host tool into: its real binary path, library deps, and runtime dirs.
+# Output format:
+#   BIN:<real_binary_path>  — the tool binary
+#   LIB:<real_lib_path>     — shared library dependency
+#   DIR:<dir_path>          — runtime directory to mount at original path
 resolve_tool_deps() {
     local tool_name="$1"
-    local from_shebang="${2:-}"
     local binary_path
 
     binary_path="$(command -v "$tool_name" 2>/dev/null)" || true
@@ -49,88 +84,42 @@ resolve_tool_deps() {
         return
     fi
 
-    # Resolve symlinks to real path
     local real_path
     real_path="$(readlink -f "$binary_path")"
 
-    # Always mount the binary (both symlink and real path)
-    echo "$binary_path"
-    if [ "$real_path" != "$binary_path" ]; then
-        echo "$real_path"
-    fi
-
-    # Check if it's an ELF binary
     if [ "$(head -c4 "$real_path" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
-        # Parse ldd output for shared library paths
-        ldd "$real_path" 2>/dev/null | while read -r line; do
-            # Skip linux-vdso and linux-gate (virtual, not real files)
-            case "$line" in *linux-vdso*|*linux-gate*) continue ;; esac
-
-            # Extract path: matches "libfoo.so => /usr/lib/libfoo.so (0x...)"
-            # and "/lib64/ld-linux-x86-64.so.2 (0x...)"
-            local lib_path=""
-            if echo "$line" | grep -qE "=> /.+ \(0x"; then
-                lib_path="$(echo "$line" | sed -E 's/.*=> (\/[^ ]+) \(0x.*/\1/')"
-            elif echo "$line" | grep -qE "^\s*/"; then
-                lib_path="$(echo "$line" | sed -E 's/^\s*(\/[^ ]+).*/\1/')"
-            fi
-
-            if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
-                echo "$lib_path"
-                local real_lib
-                real_lib="$(readlink -f "$lib_path")"
-                if [ "$real_lib" != "$lib_path" ]; then
-                    echo "$real_lib"
-                fi
-            fi
+        echo "BIN:${real_path}"
+        local libs
+        libs="$(collect_elf_libs "$real_path")"
+        echo "$libs" | while read -r lib; do
+            [ -n "$lib" ] && echo "LIB:${lib}"
         done
+        detect_runtime_dirs "$real_path" "$libs"
     else
-        # Not ELF — check for shebang interpreter (one level only)
-        if [ "$from_shebang" = "_shebang" ]; then
-            return
-        fi
+        # Script — resolve shebang interpreter (one level only)
+        echo "BIN:${real_path}"
         local shebang
         shebang="$(head -c256 "$real_path" 2>/dev/null | head -1)"
         if [[ "$shebang" == "#!"* ]]; then
-            # Extract interpreter path (strip #! and any arguments like /usr/bin/env python)
             local interp
             interp="$(echo "$shebang" | sed -E 's/^#!\s*//' | awk '{print $1}')"
-            if [ -n "$interp" ] && [ -f "$interp" ]; then
-                # If it's /usr/bin/env, resolve the actual tool
-                if [ "$(basename "$interp")" = "env" ]; then
-                    local env_tool
-                    env_tool="$(echo "$shebang" | sed -E 's/^#!\s*//' | awk '{print $2}')"
-                    if [ -n "$env_tool" ]; then
-                        resolve_tool_deps "$env_tool" "_shebang"
-                    fi
-                else
-                    # interp is an absolute path; emit it and resolve its deps
-                    echo "$interp"
-                    local real_interp
-                    real_interp="$(readlink -f "$interp")"
-                    if [ "$real_interp" != "$interp" ]; then
-                        echo "$real_interp"
-                    fi
-                    # If interpreter is ELF, resolve its shared libs
-                    if [ "$(head -c4 "$real_interp" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
-                        ldd "$real_interp" 2>/dev/null | while read -r line; do
-                            case "$line" in *linux-vdso*|*linux-gate*) continue ;; esac
-                            local lib_path=""
-                            if echo "$line" | grep -qE "=> /.+ \(0x"; then
-                                lib_path="$(echo "$line" | sed -E 's/.*=> (\/[^ ]+) \(0x.*/\1/')"
-                            elif echo "$line" | grep -qE "^\s*/"; then
-                                lib_path="$(echo "$line" | sed -E 's/^\s*(\/[^ ]+).*/\1/')"
-                            fi
-                            if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
-                                echo "$lib_path"
-                                local real_lib
-                                real_lib="$(readlink -f "$lib_path")"
-                                if [ "$real_lib" != "$lib_path" ]; then
-                                    echo "$real_lib"
-                                fi
-                            fi
-                        done
-                    fi
+            # Handle /usr/bin/env by resolving the actual command
+            if [ "$(basename "$interp")" = "env" ]; then
+                local env_tool
+                env_tool="$(echo "$shebang" | sed -E 's/^#!\s*//' | awk '{print $2}')"
+                interp="$(command -v "$env_tool" 2>/dev/null)" || true
+            fi
+            if [ -n "$interp" ]; then
+                local real_interp
+                real_interp="$(readlink -f "$interp")"
+                if [ "$(head -c4 "$real_interp" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+                    echo "LIB:${real_interp}"
+                    local libs
+                    libs="$(collect_elf_libs "$real_interp")"
+                    echo "$libs" | while read -r lib; do
+                        [ -n "$lib" ] && echo "LIB:${lib}"
+                    done
+                    detect_runtime_dirs "$real_interp" "$libs"
                 fi
             fi
         fi
@@ -228,20 +217,43 @@ for extra in "${EXTRA_PATHS[@]}"; do
     DOCKER_ARGS+=(-v "${abs_path}:/repos/${basename}")
 done
 
-# Mount host tools and their dependencies (read-only)
+# Mount host tools and their dependencies into isolated /opt/host-tools/
+# Binaries go to /opt/host-tools/real/<name>, libs to /opt/host-tools/lib/.
+# The entrypoint creates wrapper scripts that invoke the host's dynamic linker
+# with --library-path so host and container libraries never mix.
 if [ -n "$TOOLS_LIST" ]; then
-    declare -A TOOL_PATHS_SEEN=()
+    declare -A LIBS_SEEN=()
+    TOOL_NAMES=()
     IFS=',' read -ra TOOLS_ARRAY <<< "$TOOLS_LIST"
     for tool in "${TOOLS_ARRAY[@]}"; do
         tool="${tool## }"; tool="${tool%% }"
         [ -z "$tool" ] && continue
-        while IFS= read -r dep_path; do
-            if [ -n "$dep_path" ] && [ -z "${TOOL_PATHS_SEEN[$dep_path]+x}" ]; then
-                TOOL_PATHS_SEEN["$dep_path"]=1
-                DOCKER_ARGS+=(-v "${dep_path}:${dep_path}:ro")
-            fi
+        TOOL_NAMES+=("$tool")
+        while IFS= read -r entry; do
+            case "$entry" in
+                BIN:*)
+                    local_path="${entry#BIN:}"
+                    DOCKER_ARGS+=(-v "${local_path}:/opt/host-tools/real/${tool}:ro")
+                    ;;
+                LIB:*)
+                    local_path="${entry#LIB:}"
+                    lib_name="$(basename "$local_path")"
+                    if [ -z "${LIBS_SEEN[$local_path]+x}" ]; then
+                        LIBS_SEEN["$local_path"]=1
+                        DOCKER_ARGS+=(-v "${local_path}:/opt/host-tools/lib/${lib_name}:ro")
+                    fi
+                    ;;
+                DIR:*)
+                    local_path="${entry#DIR:}"
+                    DOCKER_ARGS+=(-v "${local_path}:${local_path}:ro")
+                    ;;
+            esac
         done < <(resolve_tool_deps "$tool")
     done
+    # Writable tmpfs for wrapper scripts created by entrypoint
+    DOCKER_ARGS+=(--tmpfs /opt/host-tools/bin:rw,exec,nosuid,size=1m,uid=1000,gid=1000)
+    # Tell entrypoint which tools to wrap
+    DOCKER_ARGS+=(-e "PI_HOST_TOOLS=$(IFS=,; echo "${TOOL_NAMES[*]}")")
 fi
 
 if [ "$LOGIN_MODE" = true ]; then
