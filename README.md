@@ -57,12 +57,11 @@ pi-docker -- --provider anthropic      # Pass flags to PI after --
 
 ### Extensions
 
-Create an extensions directory and set it (or use the default `~/pi-extensions`):
+Set the extensions directory (default is `~/pi-extensions`):
 
 ```bash
-mkdir -p ~/pi-extensions
-# or set a custom path:
-export PI_EXTENSIONS_DIR=~/my-pi-extensions
+# Add to your .zshrc / .bashrc:
+export PI_EXTENSIONS_DIR=~/Documents/10-repos/11-gitRepo/pi-extensions
 ```
 
 ### Local LLMs (Ollama / LM Studio)
