@@ -89,14 +89,9 @@ DOCKER_ARGS=(
     -v "$(pwd):/workspace"
 )
 
-# Mount auth.json (read-write for token refresh)
-if [ -f "${PI_CONFIG_DIR}/auth.json" ]; then
-    DOCKER_ARGS+=(-v "${PI_CONFIG_DIR}/auth.json:/home/pi/.pi/agent/auth.json")
-fi
-
-# Mount models.json (read-only)
-if [ -f "${PI_CONFIG_DIR}/models.json" ]; then
-    DOCKER_ARGS+=(-v "${PI_CONFIG_DIR}/models.json:/home/pi/.pi/agent/models.json:ro")
+# Mount PI config directory (read-write for auth tokens and sessions)
+if [ -d "${PI_CONFIG_DIR}" ]; then
+    DOCKER_ARGS+=(-v "${PI_CONFIG_DIR}:/home/pi/.pi/agent")
 fi
 
 # Mount extensions directory (read-write)
@@ -124,8 +119,9 @@ else
         --security-opt=no-new-privileges
         --read-only
         --tmpfs /tmp:rw,noexec,nosuid,size=256m
-        --tmpfs /home/pi/.npm-global:rw,noexec,nosuid,size=512m
-        --tmpfs /home/pi/.pi:rw,nosuid,size=512m,uid=1000,gid=1000
+        --tmpfs /home/pi/.npm-global:rw,nosuid,size=512m,uid=1000,gid=1000
+        --tmpfs /home/pi/.npm:rw,nosuid,size=256m,uid=1000,gid=1000
+        --tmpfs /home/pi/.cache:rw,nosuid,size=256m,uid=1000,gid=1000
         --add-host=host.docker.internal:host-gateway
         "${IMAGE_NAME}"
     )
