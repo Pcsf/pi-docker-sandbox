@@ -13,7 +13,8 @@ Usage: pi-docker [OPTIONS] [extra-path ...]
 Run the PI coding agent in a sandboxed Docker container.
 
 Options:
-  --login       Start in OAuth login mode (uses --network host)
+  --login       Start in OAuth login mode (uses --network host, no security)
+  --local       Use host network for local LLM access (keeps security hardening)
   --build       Build the Docker image before running
   --tools LIST  Mount host tools into container (comma-separated, e.g. python,ghdl)
   --help        Show this help message
@@ -31,6 +32,8 @@ Examples:
   pi-docker --login                  # OAuth login to Anthropic, etc.
   pi-docker --build                  # Rebuild image, then run
   pi-docker --tools python,ghdl      # Run with host tools mounted
+  pi-docker --local                   # Use host network for local LLMs
+  pi-docker --local --tools python    # Combine local LLM + host tools
 USAGE
     exit 0
 }
@@ -128,6 +131,7 @@ resolve_tool_deps() {
 
 # Parse flags
 LOGIN_MODE=false
+LOCAL_MODE=false
 BUILD_FIRST=false
 EXTRA_PATHS=()
 PI_ARGS=()
@@ -143,6 +147,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --login)
             LOGIN_MODE=true
+            ;;
+        --local)
+            LOCAL_MODE=true
             ;;
         --build)
             BUILD_FIRST=true
@@ -256,14 +263,8 @@ if [ -n "$TOOLS_LIST" ]; then
     DOCKER_ARGS+=(-e "PI_HOST_TOOLS=$(IFS=,; echo "${TOOL_NAMES[*]}")")
 fi
 
-if [ "$LOGIN_MODE" = true ]; then
-    # Login mode: use host network for OAuth callback
-    DOCKER_ARGS+=(
-        --network host
-        "${IMAGE_NAME}"
-    )
-else
-    # Normal mode: sandboxed network with host.docker.internal
+# Security hardening (applied in all modes except login)
+if [ "$LOGIN_MODE" != true ]; then
     DOCKER_ARGS+=(
         --cap-drop=ALL
         --security-opt=no-new-privileges
@@ -272,10 +273,19 @@ else
         -v pi-sandbox-npm-global:/home/pi/.npm-global
         -v pi-sandbox-npm-cache:/home/pi/.npm
         --tmpfs /home/pi/.cache:rw,nosuid,size=256m,uid=1000,gid=1000
-        --add-host=host.docker.internal:host-gateway
-        "${IMAGE_NAME}"
     )
 fi
+
+# Network mode
+if [ "$LOGIN_MODE" = true ] || [ "$LOCAL_MODE" = true ]; then
+    # Host network: needed for OAuth callbacks or local LLM access
+    DOCKER_ARGS+=(--network host -e PI_HOST_NETWORK=1)
+else
+    # Bridge network with host.docker.internal
+    DOCKER_ARGS+=(--add-host=host.docker.internal:host-gateway)
+fi
+
+DOCKER_ARGS+=("${IMAGE_NAME}")
 
 # Append any PI arguments
 if [ ${#PI_ARGS[@]} -gt 0 ]; then

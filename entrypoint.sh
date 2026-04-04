@@ -14,8 +14,9 @@ fi
 
 # Rewrite localhost URLs in models.json to host.docker.internal so that
 # local LLM servers (e.g. LM Studio) on the host are reachable from the container.
+# Skip when using host networking (--local/--login) since localhost already works.
 MODELS_FILE="/home/pi/.pi/agent/models.json"
-if [ -f "$MODELS_FILE" ] && grep -q 'localhost' "$MODELS_FILE"; then
+if [ -z "${PI_HOST_NETWORK:-}" ] && [ -f "$MODELS_FILE" ] && grep -q 'localhost' "$MODELS_FILE"; then
     sed -i 's|://localhost:|://host.docker.internal:|g' "$MODELS_FILE"
 fi
 
