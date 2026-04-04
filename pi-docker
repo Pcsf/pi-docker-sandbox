@@ -4,6 +4,7 @@ set -euo pipefail
 IMAGE_NAME="pi-sandbox"
 PI_CONFIG_DIR="${HOME}/.pi/agent"
 PI_EXTENSIONS_DIR="${PI_EXTENSIONS_DIR:-${HOME}/pi-extensions}"
+PI_SKILLS_DIR="${PI_SKILLS_DIR:-${HOME}/Documents/10-repos/11-gitRepo/my-skills/skills}"
 
 usage() {
     cat <<'USAGE'
@@ -21,6 +22,7 @@ Arguments:
 
 Environment:
   PI_EXTENSIONS_DIR   Extensions directory (default: ~/pi-extensions)
+  PI_SKILLS_DIR       Skills directory (default: ~/Documents/10-repos/11-gitRepo/my-skills/skills)
 
 Examples:
   pi-docker                          # Run in current directory
@@ -92,6 +94,11 @@ DOCKER_ARGS=(
 # Mount PI config directory (read-write for auth tokens and sessions)
 if [ -d "${PI_CONFIG_DIR}" ]; then
     DOCKER_ARGS+=(-v "${PI_CONFIG_DIR}:/home/pi/.pi/agent")
+fi
+
+# Mount skills directory (read-write, resolves host symlink)
+if [ -d "${PI_SKILLS_DIR}" ]; then
+    DOCKER_ARGS+=(-v "${PI_SKILLS_DIR}:/home/pi/.pi/agent/skills")
 fi
 
 # Mount extensions directory (read-write)
