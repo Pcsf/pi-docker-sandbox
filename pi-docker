@@ -69,7 +69,7 @@ done
 
 # Build if requested
 if [ "$BUILD_FIRST" = true ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
     echo "Building ${IMAGE_NAME}..."
     docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
 fi
