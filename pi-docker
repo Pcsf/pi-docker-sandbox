@@ -35,6 +35,108 @@ USAGE
     exit 0
 }
 
+# Resolve a host binary and all its shared library dependencies.
+# Outputs one absolute path per line (deduplicated externally).
+# Second arg "_shebang" prevents recursive shebang chasing.
+resolve_tool_deps() {
+    local tool_name="$1"
+    local from_shebang="${2:-}"
+    local binary_path
+
+    binary_path="$(command -v "$tool_name" 2>/dev/null)" || true
+    if [ -z "$binary_path" ]; then
+        echo "Warning: tool '${tool_name}' not found on host, skipping" >&2
+        return
+    fi
+
+    # Resolve symlinks to real path
+    local real_path
+    real_path="$(readlink -f "$binary_path")"
+
+    # Always mount the binary (both symlink and real path)
+    echo "$binary_path"
+    if [ "$real_path" != "$binary_path" ]; then
+        echo "$real_path"
+    fi
+
+    # Check if it's an ELF binary
+    if [ "$(head -c4 "$real_path" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+        # Parse ldd output for shared library paths
+        ldd "$real_path" 2>/dev/null | while read -r line; do
+            # Skip linux-vdso and linux-gate (virtual, not real files)
+            case "$line" in *linux-vdso*|*linux-gate*) continue ;; esac
+
+            # Extract path: matches "libfoo.so => /usr/lib/libfoo.so (0x...)"
+            # and "/lib64/ld-linux-x86-64.so.2 (0x...)"
+            local lib_path=""
+            if echo "$line" | grep -qE "=> /.+ \(0x"; then
+                lib_path="$(echo "$line" | sed -E 's/.*=> (\/[^ ]+) \(0x.*/\1/')"
+            elif echo "$line" | grep -qE "^\s*/"; then
+                lib_path="$(echo "$line" | sed -E 's/^\s*(\/[^ ]+).*/\1/')"
+            fi
+
+            if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
+                echo "$lib_path"
+                local real_lib
+                real_lib="$(readlink -f "$lib_path")"
+                if [ "$real_lib" != "$lib_path" ]; then
+                    echo "$real_lib"
+                fi
+            fi
+        done
+    else
+        # Not ELF — check for shebang interpreter (one level only)
+        if [ "$from_shebang" = "_shebang" ]; then
+            return
+        fi
+        local shebang
+        shebang="$(head -c256 "$real_path" 2>/dev/null | head -1)"
+        if [[ "$shebang" == "#!"* ]]; then
+            # Extract interpreter path (strip #! and any arguments like /usr/bin/env python)
+            local interp
+            interp="$(echo "$shebang" | sed -E 's/^#!\s*//' | awk '{print $1}')"
+            if [ -n "$interp" ] && [ -f "$interp" ]; then
+                # If it's /usr/bin/env, resolve the actual tool
+                if [ "$(basename "$interp")" = "env" ]; then
+                    local env_tool
+                    env_tool="$(echo "$shebang" | sed -E 's/^#!\s*//' | awk '{print $2}')"
+                    if [ -n "$env_tool" ]; then
+                        resolve_tool_deps "$env_tool" "_shebang"
+                    fi
+                else
+                    # interp is an absolute path; emit it and resolve its deps
+                    echo "$interp"
+                    local real_interp
+                    real_interp="$(readlink -f "$interp")"
+                    if [ "$real_interp" != "$interp" ]; then
+                        echo "$real_interp"
+                    fi
+                    # If interpreter is ELF, resolve its shared libs
+                    if [ "$(head -c4 "$real_interp" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+                        ldd "$real_interp" 2>/dev/null | while read -r line; do
+                            case "$line" in *linux-vdso*|*linux-gate*) continue ;; esac
+                            local lib_path=""
+                            if echo "$line" | grep -qE "=> /.+ \(0x"; then
+                                lib_path="$(echo "$line" | sed -E 's/.*=> (\/[^ ]+) \(0x.*/\1/')"
+                            elif echo "$line" | grep -qE "^\s*/"; then
+                                lib_path="$(echo "$line" | sed -E 's/^\s*(\/[^ ]+).*/\1/')"
+                            fi
+                            if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
+                                echo "$lib_path"
+                                local real_lib
+                                real_lib="$(readlink -f "$lib_path")"
+                                if [ "$real_lib" != "$lib_path" ]; then
+                                    echo "$real_lib"
+                                fi
+                            fi
+                        done
+                    fi
+                fi
+            fi
+        fi
+    fi
+}
+
 # Parse flags
 LOGIN_MODE=false
 BUILD_FIRST=false
