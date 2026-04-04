@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE_NAME="pi-sandbox"
+PI_CONFIG_DIR="${HOME}/.pi/agent"
+PI_EXTENSIONS_DIR="${PI_EXTENSIONS_DIR:-${HOME}/pi-extensions}"
+
+usage() {
+    cat <<'USAGE'
+Usage: pi-docker [OPTIONS] [extra-path ...]
+
+Run the PI coding agent in a sandboxed Docker container.
+
+Options:
+  --login       Start in OAuth login mode (uses --network host)
+  --build       Build the Docker image before running
+  --help        Show this help message
+
+Arguments:
+  extra-path    Additional host directories to mount under /repos/<basename>
+
+Environment:
+  PI_EXTENSIONS_DIR   Extensions directory (default: ~/pi-extensions)
+
+Examples:
+  pi-docker                          # Run in current directory
+  pi-docker ~/other-repo             # Mount extra repo under /repos/other-repo
+  pi-docker --login                  # OAuth login to Anthropic, etc.
+  pi-docker --build                  # Rebuild image, then run
+USAGE
+    exit 0
+}
+
+# Parse flags
+LOGIN_MODE=false
+BUILD_FIRST=false
+EXTRA_PATHS=()
+PI_ARGS=()
+PARSING_PI_ARGS=false
+
+for arg in "$@"; do
+    if [ "$PARSING_PI_ARGS" = true ]; then
+        PI_ARGS+=("$arg")
+        continue
+    fi
+    case "$arg" in
+        --login)
+            LOGIN_MODE=true
+            ;;
+        --build)
+            BUILD_FIRST=true
+            ;;
+        --help)
+            usage
+            ;;
+        --)
+            PARSING_PI_ARGS=true
+            ;;
+        -*)
+            PI_ARGS+=("$arg")
+            ;;
+        *)
+            EXTRA_PATHS+=("$arg")
+            ;;
+    esac
+done
+
+# Build if requested
+if [ "$BUILD_FIRST" = true ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    echo "Building ${IMAGE_NAME}..."
+    docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
+fi
+
+# Check image exists
+if ! docker image inspect "${IMAGE_NAME}" &>/dev/null; then
+    echo "Error: Docker image '${IMAGE_NAME}' not found. Run with --build first."
+    exit 1
+fi
+
+# Build docker run command
+DOCKER_ARGS=(
+    docker run
+    --rm
+    -it
+    --name "pi-sandbox-$$"
+    -e "TERM=${TERM:-xterm-256color}"
+    -w /workspace
+    -v "$(pwd):/workspace"
+)
+
+# Mount auth.json (read-write for token refresh)
+if [ -f "${PI_CONFIG_DIR}/auth.json" ]; then
+    DOCKER_ARGS+=(-v "${PI_CONFIG_DIR}/auth.json:/home/pi/.pi/agent/auth.json")
+fi
+
+# Mount models.json (read-only)
+if [ -f "${PI_CONFIG_DIR}/models.json" ]; then
+    DOCKER_ARGS+=(-v "${PI_CONFIG_DIR}/models.json:/home/pi/.pi/agent/models.json:ro")
+fi
+
+# Mount extensions directory (read-write)
+if [ -d "${PI_EXTENSIONS_DIR}" ]; then
+    DOCKER_ARGS+=(-v "${PI_EXTENSIONS_DIR}:/home/pi/.pi/agent/extensions")
+fi
+
+# Mount extra paths under /repos/<basename>
+for extra in "${EXTRA_PATHS[@]}"; do
+    abs_path="$(cd "$extra" && pwd)"
+    basename="$(basename "$abs_path")"
+    DOCKER_ARGS+=(-v "${abs_path}:/repos/${basename}")
+done
+
+if [ "$LOGIN_MODE" = true ]; then
+    # Login mode: use host network for OAuth callback
+    DOCKER_ARGS+=(
+        --network host
+        "${IMAGE_NAME}"
+    )
+else
+    # Normal mode: sandboxed network with host.docker.internal
+    DOCKER_ARGS+=(
+        --cap-drop=ALL
+        --security-opt=no-new-privileges
+        --read-only
+        --tmpfs /tmp:rw,noexec,nosuid,size=256m
+        --tmpfs /home/pi/.npm-global:rw,noexec,nosuid,size=512m
+        --add-host=host.docker.internal:host-gateway
+        "${IMAGE_NAME}"
+    )
+fi
+
+# Append any PI arguments
+if [ ${#PI_ARGS[@]} -gt 0 ]; then
+    DOCKER_ARGS+=("${PI_ARGS[@]}")
+fi
+
+exec "${DOCKER_ARGS[@]}"
