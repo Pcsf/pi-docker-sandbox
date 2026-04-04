@@ -119,8 +119,8 @@ else
         --security-opt=no-new-privileges
         --read-only
         --tmpfs /tmp:rw,noexec,nosuid,size=256m
-        --tmpfs /home/pi/.npm-global:rw,nosuid,size=512m,uid=1000,gid=1000
-        --tmpfs /home/pi/.npm:rw,nosuid,size=256m,uid=1000,gid=1000
+        -v pi-sandbox-npm-global:/home/pi/.npm-global
+        -v pi-sandbox-npm-cache:/home/pi/.npm
         --tmpfs /home/pi/.cache:rw,nosuid,size=256m,uid=1000,gid=1000
         --add-host=host.docker.internal:host-gateway
         "${IMAGE_NAME}"
