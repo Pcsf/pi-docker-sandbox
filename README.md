@@ -55,6 +55,17 @@ pi-docker -- --provider anthropic      # Pass flags to PI after --
 - Docker installed and running
 - `~/.pi/agent/` directory exists (created by previous PI installation)
 
+### Skills
+
+Skills are mounted from your git repo. The default path is `~/Documents/10-repos/11-gitRepo/my-skills/skills`. To override:
+
+```bash
+# Add to your .zshrc / .bashrc:
+export PI_SKILLS_DIR=~/path/to/your/skills
+```
+
+On the host, `~/.pi/agent/skills` is a symlink to the same repo. Inside the container, the directory is bind-mounted directly.
+
 ### Extensions
 
 Set the extensions directory (default is `~/pi-extensions`):
@@ -99,13 +110,26 @@ ln -s "$(pwd)/pi-docker" ~/.local/bin/pi-docker
 
 ## Container Paths
 
-| Host Path | Container Path | Mode |
-|---|---|---|
-| Current directory | `/workspace` | read-write |
-| `~/.pi/agent/auth.json` | `/home/pi/.pi/agent/auth.json` | read-write |
-| `~/.pi/agent/models.json` | `/home/pi/.pi/agent/models.json` | read-only |
-| `~/pi-extensions/` | `/home/pi/.pi/agent/extensions/` | read-write |
-| Extra paths | `/repos/<dirname>` | read-write |
+| Host Path | Container Path | Mode | Type |
+|---|---|---|---|
+| Current directory | `/workspace` | read-write | bind mount |
+| `~/.pi/agent/` | `/home/pi/.pi/agent/` | read-write | bind mount |
+| Skills dir | `/home/pi/.pi/agent/skills/` | read-write | bind mount |
+| Extensions dir | `/home/pi/.pi/agent/extensions/` | read-write | bind mount |
+| Extra paths | `/repos/<dirname>` | read-write | bind mount |
+| npm packages | `/home/pi/.npm-global/` | read-write | named volume |
+| npm cache | `/home/pi/.npm/` | read-write | named volume |
+| `/tmp` | `/tmp` | read-write | tmpfs |
+| `~/.cache` | `/home/pi/.cache/` | read-write | tmpfs |
+
+Named volumes (`pi-sandbox-npm-global`, `pi-sandbox-npm-cache`) persist between runs so extensions only install once.
+
+## Updating PI
+
+1. Edit `Dockerfile` — change the version number in the `npm install` line
+2. Rebuild: `pi-docker --build` or `docker build -t pi-sandbox .`
+3. Clear cached extensions: `docker volume rm pi-sandbox-npm-global pi-sandbox-npm-cache`
+4. First run after update will reinstall extensions into the volumes
 
 ## Uninstalling Host PI
 
