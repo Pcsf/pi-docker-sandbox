@@ -10,6 +10,7 @@ A sandboxed Docker environment for the [PI coding agent](https://github.com/badl
 - **Security hardening** — dropped capabilities, no-new-privileges, read-only rootfs
 - **OAuth login support** — use your Anthropic/GitHub/Google subscription
 - **Local LLM support** — connect to Ollama/LM Studio on the host
+- **Host tool mounting** — expose host binaries (python, ghdl, emacs, etc.) to the container
 - **Extension development** — mount your extensions directory for seamless dev
 
 ## Quick Start
@@ -45,6 +46,8 @@ pi-docker ~/extra-repo                 # Mount additional repo under /repos/extr
 pi-docker ~/repo1 ~/repo2             # Mount multiple extra directories
 pi-docker --login                      # OAuth login mode
 pi-docker --build                      # Rebuild image, then run
+pi-docker --tools python,ghdl          # Mount host tools into container
+pi-docker --tools emacs ~/extra-repo   # Combine with other options
 pi-docker -- --provider anthropic      # Pass flags to PI after --
 ```
 
@@ -75,15 +78,35 @@ Set the extensions directory (default is `~/pi-extensions`):
 export PI_EXTENSIONS_DIR=~/path/to/your/extensions
 ```
 
+### Host Tools
+
+Mount host-installed tools into the container so the LLM can run them (e.g. to test code):
+
+```bash
+pi-docker --tools python,ghdl,emacs
+```
+
+Each tool is auto-discovered via `which`, and its shared library dependencies are resolved via `ldd`. Everything is mounted into an isolated `/opt/host-tools/` directory with read-only bind mounts. The entrypoint creates wrapper scripts that invoke the host's dynamic linker with `--library-path`, so host and container libraries never mix.
+
+**How it works:**
+- Binaries → `/opt/host-tools/real/<name>` (read-only)
+- Shared libs → `/opt/host-tools/lib/` (read-only, isolated from container libs)
+- Runtime dirs (e.g. Python stdlib) → mounted at original paths
+- Wrappers → `/opt/host-tools/bin/` (added to `PATH`)
+
+**Limitations:**
+- Tools needing runtime data beyond binary + shared libs may need additional support. Python stdlib is detected automatically; other tools may need `detect_runtime_dirs()` updated in `pi-docker`.
+- Tool names must match what `which` finds on the host.
+
 ### Local LLMs (Ollama / LM Studio)
 
-Edit `~/.pi/agent/models.json` to use `host.docker.internal` instead of `localhost`:
+Configure `~/.pi/agent/models.json` with `localhost` URLs as usual — the entrypoint automatically rewrites them to `host.docker.internal` at container startup:
 
 ```json
 {
   "providers": {
     "ollama": {
-      "baseUrl": "http://host.docker.internal:11434/v1",
+      "baseUrl": "http://localhost:11434/v1",
       "api": "openai-completions",
       "apiKey": "ollama",
       "models": [
@@ -91,7 +114,7 @@ Edit `~/.pi/agent/models.json` to use `host.docker.internal` instead of `localho
       ]
     },
     "lm-studio": {
-      "baseUrl": "http://host.docker.internal:1234/v1",
+      "baseUrl": "http://localhost:1234/v1",
       "api": "openai-completions",
       "apiKey": "lm-studio",
       "models": [
@@ -119,6 +142,9 @@ ln -s "$(pwd)/pi-docker" ~/.local/bin/pi-docker
 | Extra paths | `/repos/<dirname>` | read-write | bind mount |
 | npm packages | `/home/pi/.npm-global/` | read-write | named volume |
 | npm cache | `/home/pi/.npm/` | read-write | named volume |
+| Host tools (binary) | `/opt/host-tools/real/<name>` | read-only | bind mount |
+| Host tools (libs) | `/opt/host-tools/lib/` | read-only | bind mount |
+| Host tools (wrappers) | `/opt/host-tools/bin/` | read-write | tmpfs |
 | `/tmp` | `/tmp` | read-write | tmpfs |
 | `~/.cache` | `/home/pi/.cache/` | read-write | tmpfs |
 
