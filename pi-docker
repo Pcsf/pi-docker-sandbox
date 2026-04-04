@@ -4,7 +4,7 @@ set -euo pipefail
 IMAGE_NAME="pi-sandbox"
 PI_CONFIG_DIR="${HOME}/.pi/agent"
 PI_EXTENSIONS_DIR="${PI_EXTENSIONS_DIR:-${HOME}/pi-extensions}"
-PI_SKILLS_DIR="${PI_SKILLS_DIR:-${HOME}/Documents/10-repos/11-gitRepo/my-skills/skills}"
+PI_SKILLS_DIR="${PI_SKILLS_DIR:-${HOME}/pi-skills}"
 
 usage() {
     cat <<'USAGE'

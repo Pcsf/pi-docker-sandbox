@@ -57,7 +57,7 @@ pi-docker -- --provider anthropic      # Pass flags to PI after --
 
 ### Skills
 
-Skills are mounted from your git repo. The default path is `~/Documents/10-repos/11-gitRepo/my-skills/skills`. To override:
+Skills are mounted from a local directory (default `~/pi-skills`). Set a custom path:
 
 ```bash
 # Add to your .zshrc / .bashrc:
@@ -72,7 +72,7 @@ Set the extensions directory (default is `~/pi-extensions`):
 
 ```bash
 # Add to your .zshrc / .bashrc:
-export PI_EXTENSIONS_DIR=~/Documents/10-repos/11-gitRepo/pi-extensions
+export PI_EXTENSIONS_DIR=~/path/to/your/extensions
 ```
 
 ### Local LLMs (Ollama / LM Studio)
