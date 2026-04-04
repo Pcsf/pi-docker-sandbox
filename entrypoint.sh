@@ -19,6 +19,52 @@ if [ -f "$MODELS_FILE" ] && grep -q 'localhost' "$MODELS_FILE"; then
     sed -i 's|://localhost:|://host.docker.internal:|g' "$MODELS_FILE"
 fi
 
+# Create wrapper scripts for host tools mounted via --tools.
+# Each wrapper invokes the host's dynamic linker with --library-path so that
+# host binaries use host libraries without contaminating the container's libs.
+if [ -n "${PI_HOST_TOOLS:-}" ]; then
+    # Find the host's dynamic linker in /opt/host-tools/lib/
+    HOST_LD=""
+    for f in /opt/host-tools/lib/ld-linux-*.so.*; do
+        [ -f "$f" ] && HOST_LD="$f" && break
+    done
+
+    IFS=',' read -ra TOOLS <<< "$PI_HOST_TOOLS"
+    for tool in "${TOOLS[@]}"; do
+        real_bin="/opt/host-tools/real/${tool}"
+        wrapper="/opt/host-tools/bin/${tool}"
+        [ -f "$real_bin" ] || continue
+
+        # Detect if this tool needs PYTHONHOME (links libpython)
+        ENV_EXPORTS=""
+        if ls /opt/host-tools/lib/libpython*.so* &>/dev/null; then
+            for pydir in /usr/lib/python[0-9]*/; do
+                if [ -d "$pydir" ]; then
+                    ENV_EXPORTS="export PYTHONHOME=/usr"
+                    break
+                fi
+            done
+        fi
+
+        if [ -n "$HOST_LD" ]; then
+            cat > "$wrapper" <<WRAP
+#!/bin/sh
+${ENV_EXPORTS}
+exec "$HOST_LD" --library-path /opt/host-tools/lib "$real_bin" "\$@"
+WRAP
+        else
+            # Static binary or no ld-linux found — run directly
+            cat > "$wrapper" <<WRAP
+#!/bin/sh
+${ENV_EXPORTS}
+exec "$real_bin" "\$@"
+WRAP
+        fi
+        chmod +x "$wrapper"
+    done
+    export PATH="/opt/host-tools/bin:${PATH}"
+fi
+
 # Pass all arguments to pi, or start interactive mode
 if [ $# -eq 0 ]; then
     exec pi
