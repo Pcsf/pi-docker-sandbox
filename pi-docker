@@ -15,6 +15,7 @@ Run the PI coding agent in a sandboxed Docker container.
 Options:
   --login       Start in OAuth login mode (uses --network host)
   --build       Build the Docker image before running
+  --tools LIST  Mount host tools into container (comma-separated, e.g. python,ghdl)
   --help        Show this help message
 
 Arguments:
@@ -29,6 +30,7 @@ Examples:
   pi-docker ~/other-repo             # Mount extra repo under /repos/other-repo
   pi-docker --login                  # OAuth login to Anthropic, etc.
   pi-docker --build                  # Rebuild image, then run
+  pi-docker --tools python,ghdl      # Run with host tools mounted
 USAGE
     exit 0
 }
@@ -39,18 +41,28 @@ BUILD_FIRST=false
 EXTRA_PATHS=()
 PI_ARGS=()
 PARSING_PI_ARGS=false
+TOOLS_LIST=""
 
-for arg in "$@"; do
+while [ $# -gt 0 ]; do
     if [ "$PARSING_PI_ARGS" = true ]; then
-        PI_ARGS+=("$arg")
+        PI_ARGS+=("$1")
+        shift
         continue
     fi
-    case "$arg" in
+    case "$1" in
         --login)
             LOGIN_MODE=true
             ;;
         --build)
             BUILD_FIRST=true
+            ;;
+        --tools)
+            shift
+            TOOLS_LIST="${1:-}"
+            if [ -z "$TOOLS_LIST" ]; then
+                echo "Error: --tools requires a comma-separated list of tool names"
+                exit 1
+            fi
             ;;
         --help)
             usage
@@ -59,12 +71,13 @@ for arg in "$@"; do
             PARSING_PI_ARGS=true
             ;;
         -*)
-            PI_ARGS+=("$arg")
+            PI_ARGS+=("$1")
             ;;
         *)
-            EXTRA_PATHS+=("$arg")
+            EXTRA_PATHS+=("$1")
             ;;
     esac
+    shift
 done
 
 # Build if requested
