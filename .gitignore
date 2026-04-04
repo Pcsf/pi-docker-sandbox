@@ -1,3 +1,6 @@
 # Build artifacts
 *.tar
 *.tar.gz
+
+# Design specs and plans
+docs/
