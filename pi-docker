@@ -125,6 +125,7 @@ else
         --read-only
         --tmpfs /tmp:rw,noexec,nosuid,size=256m
         --tmpfs /home/pi/.npm-global:rw,noexec,nosuid,size=512m
+        --tmpfs /home/pi/.pi:rw,nosuid,size=512m,uid=1000,gid=1000
         --add-host=host.docker.internal:host-gateway
         "${IMAGE_NAME}"
     )
