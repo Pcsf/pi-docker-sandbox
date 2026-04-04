@@ -12,13 +12,10 @@ fi
 
 # If models.json was not mounted, skip (PI works without it)
 
-# Rewrite localhost URLs in models.json to host.docker.internal so that
-# local LLM servers (e.g. LM Studio) on the host are reachable from the container.
-# Skip when using host networking (--local/--login) since localhost already works.
-MODELS_FILE="/home/pi/.pi/agent/models.json"
-if [ -z "${PI_HOST_NETWORK:-}" ] && [ -f "$MODELS_FILE" ] && grep -q 'localhost' "$MODELS_FILE"; then
-    sed -i 's|://localhost:|://host.docker.internal:|g' "$MODELS_FILE"
-fi
+# Local LLM servers (LM Studio, Ollama) typically bind to 127.0.0.1.
+# Use --local flag for host networking so localhost URLs work directly.
+# No URL rewriting needed — it would permanently modify the host's
+# bind-mounted models.json file.
 
 # Create wrapper scripts for host tools mounted via --tools.
 # Each wrapper invokes the host's dynamic linker with --library-path so that
