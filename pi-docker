@@ -228,6 +228,22 @@ for extra in "${EXTRA_PATHS[@]}"; do
     DOCKER_ARGS+=(-v "${abs_path}:/repos/${basename}")
 done
 
+# Mount host tools and their dependencies (read-only)
+if [ -n "$TOOLS_LIST" ]; then
+    declare -A TOOL_PATHS_SEEN=()
+    IFS=',' read -ra TOOLS_ARRAY <<< "$TOOLS_LIST"
+    for tool in "${TOOLS_ARRAY[@]}"; do
+        tool="${tool## }"; tool="${tool%% }"
+        [ -z "$tool" ] && continue
+        while IFS= read -r dep_path; do
+            if [ -n "$dep_path" ] && [ -z "${TOOL_PATHS_SEEN[$dep_path]+x}" ]; then
+                TOOL_PATHS_SEEN["$dep_path"]=1
+                DOCKER_ARGS+=(-v "${dep_path}:${dep_path}:ro")
+            fi
+        done < <(resolve_tool_deps "$tool")
+    done
+fi
+
 if [ "$LOGIN_MODE" = true ]; then
     # Login mode: use host network for OAuth callback
     DOCKER_ARGS+=(
