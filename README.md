@@ -100,7 +100,14 @@ Each tool is auto-discovered via `which`, and its shared library dependencies ar
 
 ### Local LLMs (Ollama / LM Studio)
 
-Configure `~/.pi/agent/models.json` with `localhost` URLs as usual — the entrypoint automatically rewrites them to `host.docker.internal` at container startup:
+Use the `--local` flag to enable host networking so the container can reach local LLM servers. This is required because servers like LM Studio typically bind to `127.0.0.1` only, which is unreachable from Docker's default bridge network.
+
+```bash
+pi-docker --local                      # local LLMs only
+pi-docker --local --tools python       # local LLMs + host tools
+```
+
+Configure `~/.pi/agent/models.json` with `localhost` URLs as usual:
 
 ```json
 {
