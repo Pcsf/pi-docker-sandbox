@@ -12,7 +12,7 @@ RUN apt-get update && \
 RUN npm config set fund false && \
     npm config set update-notifier false && \
     npm config set loglevel error && \
-    npm install -g @mariozechner/pi-coding-agent@0.65.0 && \
+    npm install -g @mariozechner/pi-coding-agent@0.66.0 && \
     npm cache clean --force
 
 RUN usermod -l pi -d /home/pi -m node && \
