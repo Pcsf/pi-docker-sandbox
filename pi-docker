@@ -17,6 +17,11 @@ Options:
   --local       Use host network for local LLM access (keeps security hardening)
   --build       Build the Docker image before running
   --tools LIST  Mount host tools into container (comma-separated, e.g. python,ghdl)
+  --host-apps   Bind-mount host /usr/{bin,lib,lib64,lib32,libexec,sbin,share,include}
+                read-only into the container so every host-installed application
+                works natively. Implies read access to all of host /usr (except
+                /usr/local and /usr/src). Writes stay confined to /workspace,
+                /home/pi/.pi/, and /tmp. Supersedes --tools.
   --help        Show this help message
 
 Arguments:
@@ -27,13 +32,15 @@ Environment:
   PI_SKILLS_DIR       Skills directory (default: ~/Documents/10-repos/11-gitRepo/my-skills/skills)
 
 Examples:
-  pi-docker                          # Run in current directory
-  pi-docker ~/other-repo             # Mount extra repo under /repos/other-repo
-  pi-docker --login                  # OAuth login to Anthropic, etc.
-  pi-docker --build                  # Rebuild image, then run
-  pi-docker --tools python,ghdl      # Run with host tools mounted
+  pi-docker                           # Run in current directory
+  pi-docker ~/other-repo              # Mount extra repo under /repos/other-repo
+  pi-docker --login                   # OAuth login to Anthropic, etc.
+  pi-docker --build                   # Rebuild image, then run
+  pi-docker --tools python,ghdl       # Run with host tools mounted
   pi-docker --local                   # Use host network for local LLMs
   pi-docker --local --tools python    # Combine local LLM + host tools
+  pi-docker --host-apps               # Full host app access (write-jail mode)
+  pi-docker --host-apps --local       # Host apps + local LLMs
 USAGE
     exit 0
 }
@@ -222,6 +229,7 @@ resolve_tool_deps() {
 LOGIN_MODE=false
 LOCAL_MODE=false
 BUILD_FIRST=false
+HOST_APPS_MODE=false
 EXTRA_PATHS=()
 PI_ARGS=()
 PARSING_PI_ARGS=false
@@ -242,6 +250,9 @@ while [ $# -gt 0 ]; do
             ;;
         --build)
             BUILD_FIRST=true
+            ;;
+        --host-apps)
+            HOST_APPS_MODE=true
             ;;
         --tools)
             shift
@@ -266,6 +277,12 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# --host-apps supersedes --tools (it covers the same ground more broadly).
+if [ "$HOST_APPS_MODE" = true ] && [ -n "$TOOLS_LIST" ]; then
+    echo "Note: --host-apps implies full host /usr access; ignoring --tools" >&2
+    TOOLS_LIST=""
+fi
 
 # Build if requested
 if [ "$BUILD_FIRST" = true ]; then
@@ -406,6 +423,18 @@ if [ -n "$TOOLS_LIST" ]; then
     DOCKER_ARGS+=(--tmpfs /opt/host-tools/bin:rw,exec,nosuid,size=1m,uid=1000,gid=1000)
     # Tell entrypoint which tools to wrap
     DOCKER_ARGS+=(-e "PI_HOST_TOOLS=$(IFS=,; echo "${TOOL_NAMES[*]}")")
+fi
+
+# --host-apps mode: bind-mount host /usr subdirs over the container's /usr so
+# every host-installed binary works natively. No wrappers, no lib isolation.
+# /usr/local and /usr/src are excluded to keep user scripts (which may embed
+# secrets) out of the container. The container's pi agent lives at
+# /opt/pi-agent (outside /usr), so it survives the overlay.
+if [ "$HOST_APPS_MODE" = true ]; then
+    for sub in bin sbin lib lib32 lib64 libexec share include; do
+        [ -d "/usr/${sub}" ] && \
+            DOCKER_ARGS+=(-v "/usr/${sub}:/usr/${sub}:ro")
+    done
 fi
 
 # Security hardening (applied in all modes except login)

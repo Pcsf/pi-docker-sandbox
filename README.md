@@ -5,12 +5,12 @@ A sandboxed Docker environment for the [PI coding agent](https://github.com/badl
 ## Features
 
 - **Filesystem isolation** — PI can only access explicitly mounted directories
-- **Minimal toolset** — only `git`, `jq`, `node`, `npm`, and `ripgrep` preinstalled
+- **Minimal toolset** — `git`, `jq`, `node`, `npm`, `ripgrep`, and `octave` preinstalled
 - **Non-root execution** — runs as unprivileged `pi` user
 - **Security hardening** — dropped capabilities, no-new-privileges, read-only rootfs
 - **OAuth login support** — use your Anthropic/GitHub/Google subscription
 - **Local LLM support** — connect to Ollama/LM Studio on the host
-- **Host tool mounting** — expose host binaries (python, ghdl, octave, emacs, …) including multi-binary tools with shared-lib subdirectories
+- **Host tool mounting** — expose simple host binaries (python, ghdl, emacs, …) to the container via `--tools`
 - **Extension development** — mount your extensions directory for seamless dev
 - **Arch-based base image** — matches the glibc/ABI of an Arch host, so mounted host binaries load without version skew
 
@@ -44,11 +44,13 @@ pi-docker
 ```bash
 pi-docker                              # Run in current directory
 pi-docker ~/extra-repo                 # Mount additional repo under /repos/extra-repo
-pi-docker ~/repo1 ~/repo2             # Mount multiple extra directories
+pi-docker ~/repo1 ~/repo2              # Mount multiple extra directories
 pi-docker --login                      # OAuth login mode
 pi-docker --build                      # Rebuild image, then run
-pi-docker --tools python,ghdl          # Mount host tools into container
+pi-docker --tools python,ghdl          # Mount individual host tools
 pi-docker --tools emacs ~/extra-repo   # Combine with other options
+pi-docker --host-apps                  # Full host application access (write jail)
+pi-docker --host-apps --local          # Host apps + local LLMs
 pi-docker -- --provider anthropic      # Pass flags to PI after --
 ```
 
@@ -101,6 +103,59 @@ Each tool is auto-discovered via `which`, its shared-library dependencies are re
 - If a tool expects writable config under `/usr/local` or spawns an unrelated binary via absolute path (outside its own sibling prefix), you may need to add it to `--tools` explicitly.
 - Binaries from a host with *newer* glibc than the container's will fail with `GLIBC_x.xx not found`. The default Arch base image matches an Arch host's glibc, but if your host runs something newer, rebuild the image (`pi-docker --build`) so the container picks up the latest `archlinux:latest`.
 
+**When *not* to use `--tools`:**
+
+For applications that carry their own runtime ecosystem — package managers, plugin systems, autoload scripts, version-coupled data files — mounting the host binary is fragile. Octave is the canonical example: its `PKG_ADD` bootstrap calls builtins that only resolve under the full installed environment, which the mount-and-wrap approach can't recreate.
+
+**For such apps, either install them directly in the container's `Dockerfile` (`octave` is preinstalled for this reason), or use `--host-apps` (see below) which exposes every host-installed app at once.**
+
+Rule of thumb:
+- **Standalone binaries** (`jq`, `ghdl`, small Python CLIs): `--tools` is fine.
+- **Apps with their own package/plugin system**: add to `Dockerfile`, or use `--host-apps`.
+
+### Host Apps Mode (`--host-apps`)
+
+A looser sandbox that gives the container **full read access to every host-installed application**, while keeping writes confined. The sandbox becomes a *write jail* rather than a filesystem sandbox — similar to `distrobox` or Fedora's `toolbox`.
+
+```bash
+pi-docker --host-apps            # any host binary just works
+pi-docker --host-apps --local    # + local LLMs
+```
+
+**What it mounts (read-only, at literal paths, overlaying the container):**
+- `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/lib32`, `/usr/lib64`, `/usr/libexec`, `/usr/share`, `/usr/include`
+
+**Not mounted** (kept container-local or excluded):
+- `/usr/local`, `/usr/src` — may contain user-installed scripts with hardcoded secrets
+- `/etc`, `/opt`, `/var`, `/home/<you>` — container has its own
+- `$HOME/.ssh`, `$HOME/.aws`, etc. — never exposed unless you explicitly mount them as an extra path
+
+**What stays writable:**
+- `/workspace`, `/home/pi/.pi/`, `/tmp` (tmpfs)
+
+**What stays enforced (same as default mode):**
+- `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--read-only` rootfs
+- Non-root `pi` user (UID 1000)
+- Bridge network (or host network only with `--local`/`--login`)
+
+**Tradeoffs:**
+- **+** Every host app works out of the box: `octave`, `ghdl`, `vivado`, `matlab` (if in `/usr`), etc.
+- **+** No `--tools` maintenance, no wrapper scripts, no library dance
+- **−** The agent can *read* anything under host `/usr`. Most of `/usr/share` is package data, but still worth being aware of.
+- **−** Writes are still blocked, but reads could go out via network (use with `--local` scoped to localhost services if you care).
+
+**Requires:** host must have `node` somewhere on `/usr/bin` (the container's PI agent at `/opt/pi-agent/bin/pi` has a `#!/usr/bin/env node` shebang). Every Arch machine with `nodejs` installed satisfies this.
+
+**When to prefer `--host-apps` over `--tools` + Dockerfile installs:**
+- You have many host tools you'd otherwise have to enumerate in `--tools`
+- You trust the agent's scope for the session and want frictionless access
+- Tools depend on host-side config under `/usr/share` (fonts, themes, plugin packs)
+
+**When to prefer the default sandbox:**
+- You're running a task you don't fully trust
+- You want the tightest possible read surface
+- You're debugging and want reproducible, image-pinned tool versions
+
 ### Local LLMs (Ollama / LM Studio)
 
 Use the `--local` flag to enable host networking so the container can reach local LLM servers. This is required because servers like LM Studio typically bind to `127.0.0.1` only, which is unreachable from Docker's default bridge network.
@@ -152,11 +207,12 @@ ln -s "$(pwd)/pi-docker" ~/.local/bin/pi-docker
 | Extra paths | `/repos/<dirname>` | read-write | bind mount |
 | npm packages | `/home/pi/.npm-global/` | read-write | named volume |
 | npm cache | `/home/pi/.npm/` | read-write | named volume |
-| Host tools (binary) | `/opt/host-tools/real/<name>` | read-only | bind mount |
-| Host tools (non-glibc libs, SONAME-named) | `/opt/host-tools/lib/` | read-only | bind mount |
-| Host tools (sibling binaries, RPATH dirs) | original host path | read-only | bind mount |
-| Host `/usr/{bin,lib,lib64,share,…}` | `/opt/host-tools/host-usr/` | read-only | bind mount |
-| Host tools (wrappers) | `/opt/host-tools/bin/` | read-write | tmpfs |
+| Host tools (binary) — `--tools` | `/opt/host-tools/real/<name>` | read-only | bind mount |
+| Host tools (non-glibc libs) — `--tools` | `/opt/host-tools/lib/` | read-only | bind mount |
+| Host tools (siblings, RPATH dirs) — `--tools` | original host path | read-only | bind mount |
+| Host `/usr/{bin,lib,…}` — `--tools` | `/opt/host-tools/host-usr/` | read-only | bind mount |
+| Host tools (wrappers) — `--tools` | `/opt/host-tools/bin/` | read-write | tmpfs |
+| Host `/usr/{bin,sbin,lib,lib32,lib64,libexec,share,include}` — `--host-apps` | same path | read-only | bind mount |
 | `/tmp` | `/tmp` | read-write | tmpfs |
 | `~/.cache` | `/home/pi/.cache/` | read-write | tmpfs |
 
