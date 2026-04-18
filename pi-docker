@@ -38,20 +38,77 @@ USAGE
     exit 0
 }
 
-# Collect shared library paths for an ELF binary (one per line).
-# Skips virtual libraries (vdso, linux-gate). Resolves symlinks.
+# Is the given SONAME a glibc-family library? These must NOT be exposed to
+# kernel-exec'd child processes via LD_LIBRARY_PATH — mixing host glibc with
+# the container's dynamic linker causes GLIBC_PRIVATE symbol crashes. The
+# wrapper still reaches them through --library-path /opt/host-tools/host-usr/lib.
+is_glibc_lib() {
+    case "$1" in
+        libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*) return 0 ;;
+        libresolv.so.*|libnsl.so.*|libutil.so.*|libcrypt.so.*) return 0 ;;
+        libBrokenLocale.so.*|libanl.so.*|libthread_db.so.*) return 0 ;;
+        # ld-linux is intentionally NOT excluded: entrypoint.sh looks for it
+        # at /opt/host-tools/lib/ld-linux-*.so.* to generate tool wrappers.
+        # It's safe in LD_LIBRARY_PATH — kernel picks the linker from
+        # PT_INTERP, not from LD_LIBRARY_PATH.
+        *) return 1 ;;
+    esac
+}
+
+# Is the given path a standard system library directory? Mounting these would
+# overlay the container's own libs (libc, libstdc++) and break the container.
+is_system_lib_dir() {
+    case "$1" in
+        /lib|/lib64|/lib32|/usr/lib|/usr/lib64|/usr/lib32) return 0 ;;
+        /lib/x86_64-linux-gnu|/usr/lib/x86_64-linux-gnu) return 0 ;;
+        /lib/aarch64-linux-gnu|/usr/lib/aarch64-linux-gnu) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Extract RPATH/RUNPATH entries from an ELF binary (one dir per line).
+# Expands $ORIGIN to the binary's directory. Skips nonexistent paths.
+# Silently returns nothing if readelf is unavailable.
+collect_elf_rpaths() {
+    local bin="$1"
+    command -v readelf >/dev/null 2>&1 || return 0
+    local bin_dir rpath_lines
+    bin_dir="$(dirname "$bin")"
+    # Capture first so a no-match grep can't trip pipefail in the caller.
+    rpath_lines="$(readelf -d "$bin" 2>/dev/null | grep -E '\(R(UN)?PATH\)' || true)"
+    [ -z "$rpath_lines" ] && return 0
+    echo "$rpath_lines" | sed -E 's/.*\[([^]]*)\].*/\1/' | tr ':' '\n' | \
+        while read -r p; do
+            [ -z "$p" ] && continue
+            p="${p//\$ORIGIN/$bin_dir}"
+            p="${p//\$\{ORIGIN\}/$bin_dir}"
+            [ -d "$p" ] && readlink -f "$p"
+        done
+    return 0
+}
+
+# Collect shared library info for an ELF binary.
+# Emits "NEEDED|RESOLVED" pairs — NEEDED is the DT_NEEDED/SONAME-style name the
+# dynamic linker searches for (e.g. libfreetype.so.6); RESOLVED is the real file
+# on disk (e.g. /usr/lib/libfreetype.so.6.20.6). Callers mount RESOLVED at a
+# path named NEEDED so the linker finds it via LD_LIBRARY_PATH/RPATH search.
+# Skips virtual libraries (vdso, linux-gate).
 collect_elf_libs() {
     local elf_path="$1"
     ldd "$elf_path" 2>/dev/null | while read -r line; do
         case "$line" in *linux-vdso*|*linux-gate*) continue ;; esac
-        local lib_path=""
+        local needed="" lib_path=""
         if echo "$line" | grep -qE "=> /.+ \(0x"; then
+            needed="$(echo "$line" | awk '{print $1}')"
+            # Some ldd lines print absolute-path NEEDED (ld-linux); basename them.
+            case "$needed" in /*) needed="$(basename "$needed")" ;; esac
             lib_path="$(echo "$line" | sed -E 's/.*=> (\/[^ ]+) \(0x.*/\1/')"
         elif echo "$line" | grep -qE "^\s*/"; then
             lib_path="$(echo "$line" | sed -E 's/^\s*(\/[^ ]+).*/\1/')"
+            needed="$(basename "$lib_path")"
         fi
         if [ -n "$lib_path" ] && [ -f "$lib_path" ]; then
-            readlink -f "$lib_path"
+            echo "${needed}|$(readlink -f "$lib_path")"
         fi
     done
 }
@@ -94,10 +151,42 @@ resolve_tool_deps() {
         echo "BIN:${real_path}"
         local libs
         libs="$(collect_elf_libs "$real_path")"
-        echo "$libs" | while read -r lib; do
-            [ -n "$lib" ] && echo "LIB:${lib}"
+        echo "$libs" | while IFS='|' read -r lib_needed lib_path; do
+            [ -z "$lib_path" ] && continue
+            # LIB emission carries both names: NEEDED is the dynamic-linker
+            # search key (libfreetype.so.6), path is the real file.
+            echo "LIB:${lib_needed}|${lib_path}"
+            # If the lib lives in a tool-specific subdir (not a system-wide
+            # lib dir), mount that dir at its literal path. Needed for libs
+            # referenced via RPATH when the binary is exec'd by the kernel
+            # without going through our wrapper (e.g. octave spawning
+            # /usr/bin/octave-cli-*).
+            lib_dir="$(dirname "$lib_path")"
+            is_system_lib_dir "$lib_dir" || echo "DIR:${lib_dir}"
         done
         detect_runtime_dirs "$real_path" "$libs"
+        # Mount RPATH/RUNPATH dirs at their literal host paths. Needed because
+        # the kernel-invoked linker on execve'd children doesn't know about our
+        # isolated /opt/host-tools/lib — it only consults the binary's embedded
+        # RPATH, which points at host-specific subdirs like /usr/lib64/octave/*.
+        collect_elf_rpaths "$real_path" | while read -r rp; do
+            [ -n "$rp" ] && echo "DIR:${rp}"
+        done
+        # Always mount the real binary at its literal host path — when the tool
+        # is a symlink (e.g. /usr/bin/octave -> octave-cli-11.1.0) internal
+        # execve calls use the resolved absolute path, which wouldn't exist in
+        # the container otherwise.
+        echo "SIBLING:${real_path}"
+        # Detect sibling binaries (same dir, shared prefix with the tool name)
+        # that the tool may exec via hardcoded absolute paths.
+        local bindir
+        bindir="$(dirname "$binary_path")"
+        for sibling in "$bindir/${tool_name}"-* "$bindir/${tool_name}"*; do
+            [ -e "$sibling" ] || continue
+            [ "$sibling" = "$binary_path" ] && continue
+            [ "$sibling" = "$real_path" ] && continue
+            echo "SIBLING:${sibling}"
+        done
     else
         # Script — resolve shebang interpreter (one level only)
         echo "BIN:${real_path}"
@@ -230,6 +319,7 @@ done
 # with --library-path so host and container libraries never mix.
 if [ -n "$TOOLS_LIST" ]; then
     declare -A LIBS_SEEN=()
+    declare -A DIRS_SEEN=()
     TOOL_NAMES=()
     IFS=',' read -ra TOOLS_ARRAY <<< "$TOOLS_LIST"
     for tool in "${TOOLS_ARRAY[@]}"; do
@@ -243,19 +333,74 @@ if [ -n "$TOOLS_LIST" ]; then
                     DOCKER_ARGS+=(-v "${local_path}:/opt/host-tools/real/${tool}:ro")
                     ;;
                 LIB:*)
-                    local_path="${entry#LIB:}"
-                    lib_name="$(basename "$local_path")"
+                    lib_entry="${entry#LIB:}"
+                    lib_needed="${lib_entry%%|*}"
+                    local_path="${lib_entry#*|}"
+                    [ "$lib_needed" = "$local_path" ] && lib_needed="$(basename "$local_path")"
+                    # Skip glibc-family libs: exposing them to children via
+                    # LD_LIBRARY_PATH would crash the container's ld-linker.
+                    # The wrapper still finds them via /opt/host-tools/host-usr/lib.
+                    is_glibc_lib "$lib_needed" && continue
                     if [ -z "${LIBS_SEEN[$local_path]+x}" ]; then
                         LIBS_SEEN["$local_path"]=1
-                        DOCKER_ARGS+=(-v "${local_path}:/opt/host-tools/lib/${lib_name}:ro")
+                        DOCKER_ARGS+=(-v "${local_path}:/opt/host-tools/lib/${lib_needed}:ro")
                     fi
                     ;;
                 DIR:*)
                     local_path="${entry#DIR:}"
-                    DOCKER_ARGS+=(-v "${local_path}:${local_path}:ro")
+                    if [ -z "${DIRS_SEEN[$local_path]+x}" ]; then
+                        DIRS_SEEN["$local_path"]=1
+                        DOCKER_ARGS+=(-v "${local_path}:${local_path}:ro")
+                    fi
+                    ;;
+                SIBLING:*)
+                    local_path="${entry#SIBLING:}"
+                    if [ -z "${LIBS_SEEN[$local_path]+x}" ]; then
+                        LIBS_SEEN["$local_path"]=1
+                        # Bind-mount at the host's literal path so hardcoded
+                        # execve(/usr/bin/<sibling>) calls resolve inside the
+                        # container. Also pull its transitive lib deps and
+                        # RPATH dirs (needed when the sibling is exec'd
+                        # directly by the kernel, bypassing our wrapper).
+                        DOCKER_ARGS+=(-v "${local_path}:${local_path}:ro")
+                        while IFS='|' read -r sib_needed sib_lib; do
+                            [ -z "$sib_lib" ] && continue
+                            [ -z "$sib_needed" ] && sib_needed="$(basename "$sib_lib")"
+                            if ! is_glibc_lib "$sib_needed" \
+                                && [ -z "${LIBS_SEEN[$sib_lib]+x}" ]; then
+                                LIBS_SEEN["$sib_lib"]=1
+                                DOCKER_ARGS+=(-v "${sib_lib}:/opt/host-tools/lib/${sib_needed}:ro")
+                            fi
+                            sib_lib_dir="$(dirname "$sib_lib")"
+                            if ! is_system_lib_dir "$sib_lib_dir" \
+                                && [ -z "${DIRS_SEEN[$sib_lib_dir]+x}" ]; then
+                                DIRS_SEEN["$sib_lib_dir"]=1
+                                DOCKER_ARGS+=(-v "${sib_lib_dir}:${sib_lib_dir}:ro")
+                            fi
+                        done < <(collect_elf_libs "$local_path")
+                        while IFS= read -r rp; do
+                            [ -z "$rp" ] && continue
+                            if [ -z "${DIRS_SEEN[$rp]+x}" ]; then
+                                DIRS_SEEN["$rp"]=1
+                                DOCKER_ARGS+=(-v "${rp}:${rp}:ro")
+                            fi
+                        done < <(collect_elf_rpaths "$local_path")
+                    fi
                     ;;
             esac
         done < <(resolve_tool_deps "$tool")
+    done
+    # Mount host /usr read-only under /opt/host-tools/host-usr/ (excluding
+    # /usr/local and /usr/src to avoid exposing user scripts with hardcoded
+    # secrets). Covers dlopen'd libs, runtime data (fonts, themes, .m files,
+    # configs) that ldd cannot discover. Does NOT overlay the container's own
+    # /usr, so sibling binaries at hardcoded /usr/bin/<name> paths still need
+    # SIBLING: detection above.
+    for entry in /usr/*; do
+        [ -d "$entry" ] || continue
+        name="$(basename "$entry")"
+        case "$name" in local|src) continue ;; esac
+        DOCKER_ARGS+=(-v "${entry}:/opt/host-tools/host-usr/${name}:ro")
     done
     # Writable tmpfs for wrapper scripts created by entrypoint
     DOCKER_ARGS+=(--tmpfs /opt/host-tools/bin:rw,exec,nosuid,size=1m,uid=1000,gid=1000)
