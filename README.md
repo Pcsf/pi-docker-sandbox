@@ -5,13 +5,14 @@ A sandboxed Docker environment for the [PI coding agent](https://github.com/badl
 ## Features
 
 - **Filesystem isolation** — PI can only access explicitly mounted directories
-- **Minimal toolset** — only `git`, `jq`, `node`, and `npm` available
+- **Minimal toolset** — only `git`, `jq`, `node`, `npm`, and `ripgrep` preinstalled
 - **Non-root execution** — runs as unprivileged `pi` user
 - **Security hardening** — dropped capabilities, no-new-privileges, read-only rootfs
 - **OAuth login support** — use your Anthropic/GitHub/Google subscription
 - **Local LLM support** — connect to Ollama/LM Studio on the host
-- **Host tool mounting** — expose host binaries (python, ghdl, emacs, etc.) to the container
+- **Host tool mounting** — expose host binaries (python, ghdl, octave, emacs, …) including multi-binary tools with shared-lib subdirectories
 - **Extension development** — mount your extensions directory for seamless dev
+- **Arch-based base image** — matches the glibc/ABI of an Arch host, so mounted host binaries load without version skew
 
 ## Quick Start
 
@@ -83,20 +84,22 @@ export PI_EXTENSIONS_DIR=~/path/to/your/extensions
 Mount host-installed tools into the container so the LLM can run them (e.g. to test code):
 
 ```bash
-pi-docker --tools python,ghdl,emacs
+pi-docker --tools python,ghdl,octave
 ```
 
-Each tool is auto-discovered via `which`, and its shared library dependencies are resolved via `ldd`. Everything is mounted into an isolated `/opt/host-tools/` directory with read-only bind mounts. The entrypoint creates wrapper scripts that invoke the host's dynamic linker with `--library-path`, so host and container libraries never mix.
+Each tool is auto-discovered via `which`, its shared-library dependencies are resolved via `ldd`, and sibling binaries / RPATH directories are pulled in automatically. Everything is mounted read-only into an isolated `/opt/host-tools/` tree. The entrypoint generates wrapper scripts that invoke the host's dynamic linker with `--library-path`, and exports `LD_LIBRARY_PATH` so child processes launched by `exec` (common in multi-binary tools like Octave) also find the right libs.
 
 **How it works:**
-- Binaries → `/opt/host-tools/real/<name>` (read-only)
-- Shared libs → `/opt/host-tools/lib/` (read-only, isolated from container libs)
-- Runtime dirs (e.g. Python stdlib) → mounted at original paths
-- Wrappers → `/opt/host-tools/bin/` (added to `PATH`)
+- Tool binary → `/opt/host-tools/real/<name>` (read-only), wrapped by a script in `/opt/host-tools/bin/<name>` that's put on `PATH`.
+- **Sibling binaries** (same directory, shared prefix — e.g. `octave-cli-11.1.0`, `octave-config-*`) → bind-mounted at their literal host paths so hardcoded `execve("/usr/bin/<sibling>")` calls resolve.
+- **Non-glibc shared libs** → `/opt/host-tools/lib/<SONAME>` (e.g. `libfreetype.so.6`), exposed to child processes via `LD_LIBRARY_PATH`. Glibc family (`libc`, `libm`, `libpthread`, …) is intentionally excluded from this dir to avoid mixing host/container glibc.
+- **Tool-specific lib subdirs** (anything that isn't a system lib dir like `/usr/lib`) → bind-mounted at their literal paths so `RPATH`/`RUNPATH` lookups succeed. `RPATH` is also read directly via `readelf` when available.
+- **Runtime data** (`fonts`, `icons`, locale files, Octave's `.m` scripts, Python stdlib, …) → the host's `/usr/{bin,sbin,lib,lib32,lib64,libexec,share,include}` are bind-mounted at `/opt/host-tools/host-usr/*` (read-only). `XDG_DATA_DIRS` and `PATH` in the wrapper point at these. `/usr/local` and `/usr/src` are **not** mounted, to avoid exposing user-installed scripts that may embed secrets.
 
 **Limitations:**
-- Tools needing runtime data beyond binary + shared libs may need additional support. Python stdlib is detected automatically; other tools may need `detect_runtime_dirs()` updated in `pi-docker`.
 - Tool names must match what `which` finds on the host.
+- If a tool expects writable config under `/usr/local` or spawns an unrelated binary via absolute path (outside its own sibling prefix), you may need to add it to `--tools` explicitly.
+- Binaries from a host with *newer* glibc than the container's will fail with `GLIBC_x.xx not found`. The default Arch base image matches an Arch host's glibc, but if your host runs something newer, rebuild the image (`pi-docker --build`) so the container picks up the latest `archlinux:latest`.
 
 ### Local LLMs (Ollama / LM Studio)
 
@@ -150,7 +153,9 @@ ln -s "$(pwd)/pi-docker" ~/.local/bin/pi-docker
 | npm packages | `/home/pi/.npm-global/` | read-write | named volume |
 | npm cache | `/home/pi/.npm/` | read-write | named volume |
 | Host tools (binary) | `/opt/host-tools/real/<name>` | read-only | bind mount |
-| Host tools (libs) | `/opt/host-tools/lib/` | read-only | bind mount |
+| Host tools (non-glibc libs, SONAME-named) | `/opt/host-tools/lib/` | read-only | bind mount |
+| Host tools (sibling binaries, RPATH dirs) | original host path | read-only | bind mount |
+| Host `/usr/{bin,lib,lib64,share,…}` | `/opt/host-tools/host-usr/` | read-only | bind mount |
 | Host tools (wrappers) | `/opt/host-tools/bin/` | read-write | tmpfs |
 | `/tmp` | `/tmp` | read-write | tmpfs |
 | `~/.cache` | `/home/pi/.cache/` | read-write | tmpfs |
@@ -159,10 +164,12 @@ Named volumes (`pi-sandbox-npm-global`, `pi-sandbox-npm-cache`) persist between 
 
 ## Updating PI
 
-1. Edit `Dockerfile` — change the version number in the `npm install` line
+1. Edit `Dockerfile` — change the version number in the `npm install -g @mariozechner/pi-coding-agent@…` line
 2. Rebuild: `pi-docker --build` or `docker build -t pi-sandbox .`
 3. Clear cached extensions: `docker volume rm pi-sandbox-npm-global pi-sandbox-npm-cache`
 4. First run after update will reinstall extensions into the volumes
+
+Because the base image is `archlinux:latest` (rolling), a rebuild also refreshes the container's glibc and system libs. If a host binary starts failing with `GLIBC_x.xx not found` after a host system update, rerun `pi-docker --build` to resync.
 
 ## Uninstalling Host PI
 

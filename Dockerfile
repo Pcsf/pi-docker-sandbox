@@ -1,22 +1,18 @@
-FROM node:22-slim
+FROM archlinux:latest
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends git jq curl ca-certificates && \
-    curl -fsSL https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz \
-      | tar xz -C /usr/local/bin --strip-components=1 ripgrep-14.1.1-x86_64-unknown-linux-musl/rg && \
-    apt-get purge -y curl && \
-    apt-get autoremove -y && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm --needed \
+        nodejs npm git jq ripgrep ca-certificates && \
+    pacman -Scc --noconfirm && \
+    rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
 
 RUN npm config set fund false && \
     npm config set update-notifier false && \
     npm config set loglevel error && \
-    npm install -g @mariozechner/pi-coding-agent@0.66.0 && \
+    npm install -g @mariozechner/pi-coding-agent@0.66.1 && \
     npm cache clean --force
 
-RUN usermod -l pi -d /home/pi -m node && \
-    groupmod -n pi node && \
+RUN useradd -m -s /bin/bash -u 1000 pi && \
     mkdir -p /home/pi/.pi/agent /home/pi/.npm-global /workspace /repos && \
     chown -R pi:pi /home/pi /workspace /repos
 

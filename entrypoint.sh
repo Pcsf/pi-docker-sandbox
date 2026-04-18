@@ -48,7 +48,13 @@ if [ -n "${PI_HOST_TOOLS:-}" ]; then
             cat > "$wrapper" <<WRAP
 #!/bin/sh
 ${ENV_EXPORTS}
-exec "$HOST_LD" --library-path /opt/host-tools/lib "$real_bin" "\$@"
+export PATH=/opt/host-tools/host-usr/bin:/opt/host-tools/host-usr/sbin:\$PATH
+export XDG_DATA_DIRS=/opt/host-tools/host-usr/share:/usr/local/share:/usr/share
+# LD_LIBRARY_PATH propagates through execve so kernel-launched child processes
+# (e.g. octave spawning /usr/bin/octave-cli-*) find non-glibc libs we mounted
+# at their SONAME names. Glibc family is intentionally excluded from this dir.
+export LD_LIBRARY_PATH=/opt/host-tools/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}
+exec "$HOST_LD" --library-path /opt/host-tools/host-usr/lib:/opt/host-tools/host-usr/lib64:/opt/host-tools/host-usr/lib32:/opt/host-tools/lib "$real_bin" "\$@"
 WRAP
         else
             # Static binary or no ld-linux found — run directly
