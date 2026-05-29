@@ -22,10 +22,17 @@ Options:
                 works natively. Implies read access to all of host /usr (except
                 /usr/local and /usr/src). Writes stay confined to /workspace,
                 /home/pi/.pi/, and /tmp. Supersedes --tools.
+  --unrestricted
+                Remove Docker sandbox restrictions and run PI with host-like
+                access: host UID/GID, host network, writable host filesystem
+                mounts at their normal paths, and host root at /host. Supersedes
+                --tools and --host-apps.
+  --no-sandbox  Alias for --unrestricted
   --help        Show this help message
 
 Arguments:
   extra-path    Additional host directories to mount under /repos/<basename>
+                (or at the same absolute path with --unrestricted)
 
 Environment:
   PI_EXTENSIONS_DIR   Extensions directory (default: ~/pi-extensions)
@@ -41,6 +48,7 @@ Examples:
   pi-docker --local --tools python    # Combine local LLM + host tools
   pi-docker --host-apps               # Full host app access (write-jail mode)
   pi-docker --host-apps --local       # Host apps + local LLMs
+  pi-docker --unrestricted            # Host-like access, no Docker sandboxing
 USAGE
     exit 0
 }
@@ -230,6 +238,7 @@ LOGIN_MODE=false
 LOCAL_MODE=false
 BUILD_FIRST=false
 HOST_APPS_MODE=false
+UNRESTRICTED_MODE=false
 EXTRA_PATHS=()
 PI_ARGS=()
 PARSING_PI_ARGS=false
@@ -253,6 +262,9 @@ while [ $# -gt 0 ]; do
             ;;
         --host-apps)
             HOST_APPS_MODE=true
+            ;;
+        --unrestricted|--no-sandbox)
+            UNRESTRICTED_MODE=true
             ;;
         --tools)
             shift
@@ -278,6 +290,18 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# --unrestricted supersedes the partial host-access modes.
+if [ "$UNRESTRICTED_MODE" = true ]; then
+    if [ "$HOST_APPS_MODE" = true ]; then
+        echo "Note: --unrestricted implies host filesystem access; ignoring --host-apps" >&2
+        HOST_APPS_MODE=false
+    fi
+    if [ -n "$TOOLS_LIST" ]; then
+        echo "Note: --unrestricted implies host filesystem access; ignoring --tools" >&2
+        TOOLS_LIST=""
+    fi
+fi
+
 # --host-apps supersedes --tools (it covers the same ground more broadly).
 if [ "$HOST_APPS_MODE" = true ] && [ -n "$TOOLS_LIST" ]; then
     echo "Note: --host-apps implies full host /usr access; ignoring --tools" >&2
@@ -298,36 +322,75 @@ if ! docker image inspect "${IMAGE_NAME}" &>/dev/null; then
 fi
 
 # Build docker run command
+HOST_PWD="$(pwd)"
+CONTAINER_WORKDIR="/workspace"
+WORKSPACE_MOUNT="${HOST_PWD}:/workspace"
+
+if [ "$UNRESTRICTED_MODE" = true ]; then
+    CONTAINER_WORKDIR="${HOST_PWD}"
+    WORKSPACE_MOUNT="${HOST_PWD}:${HOST_PWD}"
+fi
+
 DOCKER_ARGS=(
     docker run
     --rm
     -it
     --name "pi-sandbox-$$"
     -e "TERM=${TERM:-xterm-256color}"
-    -w /workspace
-    -v "$(pwd):/workspace"
+    -w "${CONTAINER_WORKDIR}"
+    -v "${WORKSPACE_MOUNT}"
 )
 
+if [ "$UNRESTRICTED_MODE" = true ]; then
+    HOST_USER_NAME="${USER:-$(id -un)}"
+    HOST_GROUP_ID="$(id -g)"
+    DOCKER_ARGS+=(
+        --privileged
+        --user "$(id -u):${HOST_GROUP_ID}"
+        -e "HOME=${HOME}"
+        -e "USER=${HOST_USER_NAME}"
+        -e "LOGNAME=${HOST_USER_NAME}"
+        -e "NPM_CONFIG_PREFIX=/pi-npm-global"
+        -e "NPM_CONFIG_CACHE=/pi-npm-cache"
+        -e "NODE_PATH=/opt/pi-agent/lib/node_modules:/pi-npm-global/lib/node_modules"
+        -e "PATH=/opt/pi-agent/bin:/pi-npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        -v "/:/host:rw,rslave"
+        -v pi-sandbox-unrestricted-npm-global:/pi-npm-global
+        -v pi-sandbox-unrestricted-npm-cache:/pi-npm-cache
+    )
+    for gid in $(id -G); do
+        [ "$gid" = "$HOST_GROUP_ID" ] && continue
+        DOCKER_ARGS+=(--group-add "$gid")
+    done
+    for host_path in /etc /home /media /mnt /root /run /srv /tmp /usr /var; do
+        [ -e "$host_path" ] && DOCKER_ARGS+=(-v "${host_path}:${host_path}:rw,rslave")
+    done
+fi
+
 # Mount PI config directory (read-write for auth tokens and sessions)
-if [ -d "${PI_CONFIG_DIR}" ]; then
+if [ "$UNRESTRICTED_MODE" != true ] && [ -d "${PI_CONFIG_DIR}" ]; then
     DOCKER_ARGS+=(-v "${PI_CONFIG_DIR}:/home/pi/.pi/agent")
 fi
 
 # Mount skills directory (read-write, resolves host symlink)
-if [ -d "${PI_SKILLS_DIR}" ]; then
+if [ "$UNRESTRICTED_MODE" != true ] && [ -d "${PI_SKILLS_DIR}" ]; then
     DOCKER_ARGS+=(-v "${PI_SKILLS_DIR}:/home/pi/.pi/agent/skills")
 fi
 
 # Mount extensions directory (read-write)
-if [ -d "${PI_EXTENSIONS_DIR}" ]; then
+if [ "$UNRESTRICTED_MODE" != true ] && [ -d "${PI_EXTENSIONS_DIR}" ]; then
     DOCKER_ARGS+=(-v "${PI_EXTENSIONS_DIR}:/home/pi/.pi/agent/extensions")
 fi
 
 # Mount extra paths under /repos/<basename>
 for extra in "${EXTRA_PATHS[@]}"; do
     abs_path="$(cd "$extra" && pwd)"
-    basename="$(basename "$abs_path")"
-    DOCKER_ARGS+=(-v "${abs_path}:/repos/${basename}")
+    if [ "$UNRESTRICTED_MODE" = true ]; then
+        DOCKER_ARGS+=(-v "${abs_path}:${abs_path}")
+    else
+        basename="$(basename "$abs_path")"
+        DOCKER_ARGS+=(-v "${abs_path}:/repos/${basename}")
+    fi
 done
 
 # Mount host tools and their dependencies into isolated /opt/host-tools/
@@ -438,7 +501,7 @@ if [ "$HOST_APPS_MODE" = true ]; then
 fi
 
 # Security hardening (applied in all modes except login)
-if [ "$LOGIN_MODE" != true ]; then
+if [ "$LOGIN_MODE" != true ] && [ "$UNRESTRICTED_MODE" != true ]; then
     DOCKER_ARGS+=(
         --cap-drop=ALL
         --security-opt=no-new-privileges
@@ -451,7 +514,7 @@ if [ "$LOGIN_MODE" != true ]; then
 fi
 
 # Network mode
-if [ "$LOGIN_MODE" = true ] || [ "$LOCAL_MODE" = true ]; then
+if [ "$LOGIN_MODE" = true ] || [ "$LOCAL_MODE" = true ] || [ "$UNRESTRICTED_MODE" = true ]; then
     # Host network: needed for OAuth callbacks or local LLM access
     DOCKER_ARGS+=(--network host -e PI_HOST_NETWORK=1)
 else

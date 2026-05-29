@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PI_HOME="${HOME:-/home/pi}"
+PI_AGENT_DIR="${PI_HOME}/.pi/agent"
+
 # Ensure PI config directory structure exists
-mkdir -p /home/pi/.pi/agent
+mkdir -p "${PI_AGENT_DIR}"
+
+# XDG_RUNTIME_DIR needs to point at a valid dir or GUI-aware tools warn.
+# /tmp is already a tmpfs, so it's a safe fallback inside the sandbox.
+: "${XDG_RUNTIME_DIR:=/tmp}"
+export XDG_RUNTIME_DIR
 
 # If auth.json was not mounted, create an empty one
-if [ ! -f /home/pi/.pi/agent/auth.json ]; then
-    echo '{}' > /home/pi/.pi/agent/auth.json
-    chmod 600 /home/pi/.pi/agent/auth.json
+if [ ! -f "${PI_AGENT_DIR}/auth.json" ]; then
+    echo '{}' > "${PI_AGENT_DIR}/auth.json"
+    chmod 600 "${PI_AGENT_DIR}/auth.json"
 fi
 
 # If models.json was not mounted, skip (PI works without it)

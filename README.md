@@ -11,6 +11,7 @@ A sandboxed Docker environment for the [PI coding agent](https://github.com/badl
 - **OAuth login support** — use your Anthropic/GitHub/Google subscription
 - **Local LLM support** — connect to Ollama/LM Studio on the host
 - **Host tool mounting** — expose simple host binaries (python, ghdl, emacs, …) to the container via `--tools`
+- **Unrestricted mode** — run with host-like access when you do not want Docker to be a sandbox
 - **Extension development** — mount your extensions directory for seamless dev
 - **Arch-based base image** — matches the glibc/ABI of an Arch host, so mounted host binaries load without version skew
 
@@ -51,6 +52,7 @@ pi-docker --tools python,ghdl          # Mount individual host tools
 pi-docker --tools emacs ~/extra-repo   # Combine with other options
 pi-docker --host-apps                  # Full host application access (write jail)
 pi-docker --host-apps --local          # Host apps + local LLMs
+pi-docker --unrestricted               # Host-like access, no Docker sandboxing
 pi-docker -- --provider anthropic      # Pass flags to PI after --
 ```
 
@@ -156,6 +158,31 @@ pi-docker --host-apps --local    # + local LLMs
 - You want the tightest possible read surface
 - You're debugging and want reproducible, image-pinned tool versions
 
+### Unrestricted Mode (`--unrestricted`, `--no-sandbox`)
+
+Use this when you want PI to behave as closely as possible to a host install, with Docker no longer acting as the security boundary:
+
+```bash
+pi-docker --unrestricted
+pi-docker --no-sandbox                 # alias
+```
+
+**What changes:**
+- Runs with `--privileged`
+- Runs as your host UID/GID and supplementary groups
+- Uses your host `HOME`, `USER`, and `LOGNAME`
+- Uses host networking
+- Disables `--cap-drop=ALL`, `no-new-privileges`, read-only rootfs, and tmpfs write jails
+- Keeps PI extension npm packages in isolated Docker volumes at `/pi-npm-global` and `/pi-npm-cache`
+- Exposes the bundled PI packages to extensions through `NODE_PATH`
+- Mounts host `/etc`, `/home`, `/media`, `/mnt`, `/root`, `/run`, `/srv`, `/tmp`, `/usr`, and `/var` read-write at their normal paths
+- Mounts host `/` read-write at `/host`
+- Starts in the real host path for your current directory instead of `/workspace`
+
+`--unrestricted` supersedes `--tools` and `--host-apps`.
+
+**Important:** host `/opt` is available at `/host/opt`, not mounted over `/opt`, because the container's PI agent is installed under `/opt/pi-agent`. Mounting host `/opt` at `/opt` would hide the bundled PI executable before it can start.
+
 ### Local LLMs (Ollama / LM Studio)
 
 Use the `--local` flag to enable host networking so the container can reach local LLM servers. This is required because servers like LM Studio typically bind to `127.0.0.1` only, which is unreachable from Docker's default bridge network.
@@ -205,6 +232,7 @@ ln -s "$(pwd)/pi-docker" ~/.local/bin/pi-docker
 | Skills dir | `/home/pi/.pi/agent/skills/` | read-write | bind mount |
 | Extensions dir | `/home/pi/.pi/agent/extensions/` | read-write | bind mount |
 | Extra paths | `/repos/<dirname>` | read-write | bind mount |
+| Extra paths — `--unrestricted` | same absolute path | read-write | bind mount |
 | npm packages | `/home/pi/.npm-global/` | read-write | named volume |
 | npm cache | `/home/pi/.npm/` | read-write | named volume |
 | Host tools (binary) — `--tools` | `/opt/host-tools/real/<name>` | read-only | bind mount |
@@ -213,6 +241,10 @@ ln -s "$(pwd)/pi-docker" ~/.local/bin/pi-docker
 | Host `/usr/{bin,lib,…}` — `--tools` | `/opt/host-tools/host-usr/` | read-only | bind mount |
 | Host tools (wrappers) — `--tools` | `/opt/host-tools/bin/` | read-write | tmpfs |
 | Host `/usr/{bin,sbin,lib,lib32,lib64,libexec,share,include}` — `--host-apps` | same path | read-only | bind mount |
+| Host `/etc`, `/home`, `/media`, `/mnt`, `/root`, `/run`, `/srv`, `/tmp`, `/usr`, `/var` — `--unrestricted` | same path | read-write | bind mount |
+| Host `/` — `--unrestricted` | `/host` | read-write | bind mount |
+| npm packages — `--unrestricted` | `/pi-npm-global/` | read-write | named volume |
+| npm cache — `--unrestricted` | `/pi-npm-cache/` | read-write | named volume |
 | `/tmp` | `/tmp` | read-write | tmpfs |
 | `~/.cache` | `/home/pi/.cache/` | read-write | tmpfs |
 
@@ -220,7 +252,7 @@ Named volumes (`pi-sandbox-npm-global`, `pi-sandbox-npm-cache`) persist between 
 
 ## Updating PI
 
-1. Edit `Dockerfile` — change the version number in the `npm install -g @mariozechner/pi-coding-agent@…` line
+1. Edit `Dockerfile` — change the version number in the `npm install -g @earendil-works/pi-coding-agent@…` line
 2. Rebuild: `pi-docker --build` or `docker build -t pi-sandbox .`
 3. Clear cached extensions: `docker volume rm pi-sandbox-npm-global pi-sandbox-npm-cache`
 4. First run after update will reinstall extensions into the volumes
@@ -232,7 +264,7 @@ Because the base image is `archlinux:latest` (rolling), a rebuild also refreshes
 After verifying the container works:
 
 ```bash
-npm uninstall -g @mariozechner/pi-coding-agent
+npm uninstall -g @mariozechner/pi-coding-agent @earendil-works/pi-coding-agent
 npm uninstall -g @aliou/pi-extension-dev @plannotator/pi-extension @tmustier/pi-skill-creator pi-planning-with-files pi-subagents
 ```
 
