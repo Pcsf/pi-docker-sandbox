@@ -13,7 +13,7 @@ RUN pacman -Syu --noconfirm && \
 RUN npm config set fund false && \
     npm config set update-notifier false && \
     npm config set loglevel error && \
-    npm install -g --prefix /opt/pi-agent @earendil-works/pi-coding-agent@0.77.0 && \
+    npm install -g --prefix /opt/pi-agent @earendil-works/pi-coding-agent@0.80.10 && \
     npm cache clean --force
 
 RUN useradd -m -s /bin/bash -u 1000 pi && \
