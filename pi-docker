@@ -5,6 +5,7 @@ IMAGE_NAME="pi-sandbox"
 PI_CONFIG_DIR="${HOME}/.pi/agent"
 PI_EXTENSIONS_DIR="${PI_EXTENSIONS_DIR:-${HOME}/pi-extensions}"
 PI_SKILLS_DIR="${PI_SKILLS_DIR:-${HOME}/pi-skills}"
+PI_LIFEOS_CONFIG_FILE="${PI_LIFEOS_CONFIG_FILE:-${PI_CONFIG_DIR}/pi-lifeos.json}"
 
 usage() {
     cat <<'USAGE'
@@ -37,6 +38,10 @@ Arguments:
 Environment:
   PI_EXTENSIONS_DIR   Extensions directory (default: ~/pi-extensions)
   PI_SKILLS_DIR       Skills directory (default: ~/Documents/10-repos/11-gitRepo/my-skills/skills)
+  PI_LIFEOS_CONFIG_FILE
+                      LifeOS adapter config (default: ~/.pi/agent/pi-lifeos.json).
+                      When present, package/runtime/skills/USER paths are mounted
+                      read-only at their host absolute paths automatically.
 
 Examples:
   pi-docker                           # Run in current directory
@@ -375,6 +380,30 @@ fi
 # Mount skills directory (read-write, resolves host symlink)
 if [ "$UNRESTRICTED_MODE" != true ] && [ -d "${PI_SKILLS_DIR}" ]; then
     DOCKER_ARGS+=(-v "${PI_SKILLS_DIR}:/home/pi/.pi/agent/skills")
+fi
+
+# Mount host-owned LifeOS resources from the adapter's private config. The
+# package source stays outside the image, while runtime/skills/USER are read-only
+# in the restricted sandbox. Adapter observability uses the writable Pi config
+# mount instead of trying to write into the host LifeOS trees.
+if [ "$UNRESTRICTED_MODE" != true ] && [ -f "$PI_LIFEOS_CONFIG_FILE" ]; then
+    if command -v jq >/dev/null 2>&1; then
+        for key in packageRoot runtimeRoot skillsRoot userRoot; do
+            lifeos_path="$(jq -r --arg key "$key" '.[$key] // empty' "$PI_LIFEOS_CONFIG_FILE")"
+            [ -n "$lifeos_path" ] || continue
+            if [ -e "$lifeos_path" ]; then
+                DOCKER_ARGS+=(-v "${lifeos_path}:${lifeos_path}:ro")
+            else
+                echo "Warning: LifeOS ${key} path is missing: ${lifeos_path}" >&2
+            fi
+        done
+        DOCKER_ARGS+=(
+            -e "PI_LIFEOS_CONFIG=/home/pi/.pi/agent/pi-lifeos.json"
+            -e "PI_LIFEOS_STATE_ROOT=/home/pi/.pi/agent/lifeos-state"
+        )
+    else
+        echo "Warning: jq missing; LifeOS paths were not mounted" >&2
+    fi
 fi
 
 # Mount extensions directory (read-write)

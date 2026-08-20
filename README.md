@@ -74,6 +74,24 @@ export PI_SKILLS_DIR=~/path/to/your/skills
 
 On the host, `~/.pi/agent/skills` is a symlink to the same repo. Inside the container, the directory is bind-mounted directly.
 
+### LifeOS package
+
+When `~/.pi/agent/pi-lifeos.json` exists, `pi-docker` automatically mounts the
+host-owned package, LifeOS runtime, skill library, and USER directory at their
+real absolute paths. They are read-only in the normal restricted sandbox;
+LifeOS adapter state remains writable under the mounted Pi config directory.
+
+Install/configure it from the host repository once:
+
+```bash
+~/Documents/10-repos/11-gitRepo/pi-lifeos/scripts/install.sh --auto
+pi-docker
+# Inside Pi: /lifeos doctor
+```
+
+Use `--local` if Pulse on host port 31337 must be reachable. Unrestricted mode
+also works but is no longer required merely to load LifeOS.
+
 ### Extensions
 
 Set the extensions directory (default is `~/pi-extensions`):
@@ -229,6 +247,7 @@ ln -s "$(pwd)/pi-docker" ~/.local/bin/pi-docker
 |---|---|---|---|
 | Current directory | `/workspace` | read-write | bind mount |
 | `~/.pi/agent/` | `/home/pi/.pi/agent/` | read-write | bind mount |
+| LifeOS package/runtime/skills/USER (from `pi-lifeos.json`) | same host absolute paths | read-only | bind mounts |
 | Skills dir | `/home/pi/.pi/agent/skills/` | read-write | bind mount |
 | Extensions dir | `/home/pi/.pi/agent/extensions/` | read-write | bind mount |
 | Extra paths | `/repos/<dirname>` | read-write | bind mount |
