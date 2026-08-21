@@ -27,9 +27,13 @@ RUN npm install -g --prefix /opt/pi-agent bun@1.4.0 && \
     /opt/pi-agent/bin/bun --version && \
     npm cache clean --force
 
+# /home/pi is 0755, not useradd's default 0700. Under rootless Docker the
+# invoking user maps to uid 0, which runs without CAP_DAC_OVERRIDE once
+# capabilities are dropped and so cannot traverse a 0700 home.
 RUN useradd -m -s /bin/bash -u 1000 pi && \
     mkdir -p /home/pi/.pi/agent /home/pi/.npm-global /pi-npm-global /pi-npm-cache /workspace /repos && \
     chown -R pi:pi /home/pi /pi-npm-global /pi-npm-cache /workspace /repos && \
+    chmod 0755 /home/pi && \
     chmod 0777 /pi-npm-global /pi-npm-cache
 
 COPY --chown=pi:pi entrypoint.sh /pi-entrypoint.sh

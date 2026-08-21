@@ -2,6 +2,12 @@
 set -euo pipefail
 
 IMAGE_NAME="pi-sandbox"
+
+# Prefer the rootless daemon when one is running. Under rootless, container
+# root maps to the invoking user through a user namespace, so --privileged and
+# host bind mounts cannot exceed the user's own permissions. Set DOCKER_HOST
+# yourself, or pass --rootful, to opt out.
+ROOTLESS_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
 PI_CONFIG_DIR="${HOME}/.pi/agent"
 PI_EXTENSIONS_DIR="${PI_EXTENSIONS_DIR:-${HOME}/pi-extensions}"
 PI_SKILLS_DIR="${PI_SKILLS_DIR:-${HOME}/pi-skills}"
@@ -29,6 +35,8 @@ Options:
                 mounts at their normal paths, and host root at /host. Supersedes
                 --tools and --host-apps.
   --no-sandbox  Alias for --unrestricted
+  --rootful     Use the root Docker daemon even when a rootless one is running.
+                Without this, a rootless daemon is preferred automatically.
   --help        Show this help message
 
 Arguments:
@@ -244,6 +252,7 @@ LOCAL_MODE=false
 BUILD_FIRST=false
 HOST_APPS_MODE=false
 UNRESTRICTED_MODE=false
+USE_ROOTFUL=false
 EXTRA_PATHS=()
 PI_ARGS=()
 PARSING_PI_ARGS=false
@@ -318,6 +327,20 @@ if [ "$BUILD_FIRST" = true ]; then
     SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
     echo "Building ${IMAGE_NAME}..."
     docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
+fi
+
+# Select the daemon before any docker call, so build and run agree.
+ROOTLESS_DAEMON=false
+if [ "$USE_ROOTFUL" != true ] && [ -z "${DOCKER_HOST:-}" ] && [ -S "$ROOTLESS_SOCK" ]; then
+    export DOCKER_HOST="unix://${ROOTLESS_SOCK}"
+    ROOTLESS_DAEMON=true
+fi
+
+# --unrestricted on a rootful daemon is host root: --privileged plus a
+# writable / means any prompt injection reaches the real filesystem.
+if [ "$UNRESTRICTED_MODE" = true ] && [ -z "${DOCKER_HOST:-}" ]; then
+    echo "WARNING: --unrestricted on the root daemon grants host root." >&2
+    echo "         Start rootless Docker (systemctl --user start docker) to contain it." >&2
 fi
 
 # Check image exists
@@ -539,7 +562,18 @@ if [ "$LOGIN_MODE" != true ] && [ "$UNRESTRICTED_MODE" != true ]; then
         -v pi-sandbox-npm-global:/home/pi/.npm-global
         -v pi-sandbox-npm-cache:/home/pi/.npm
         --tmpfs /home/pi/.cache:rw,nosuid,size=256m,uid=1000,gid=1000
+        # A read-only HOME makes tools that persist state on exit fail there;
+        # octave reports an execution_exception and returns 0 having worked.
+        --tmpfs /home/pi/.config:rw,nosuid,size=64m,uid=1000,gid=1000
+        --tmpfs /home/pi/.local:rw,nosuid,size=64m,uid=1000,gid=1000
     )
+fi
+
+# Rootless Docker maps the invoking user to container uid 0, so the image's
+# own "pi" user (uid 1000) owns none of the bind-mounted host files and cannot
+# write the workspace. Run as uid 0, which IS this user outside the namespace.
+if [ "$ROOTLESS_DAEMON" = true ] && [ "$UNRESTRICTED_MODE" != true ]; then
+    DOCKER_ARGS+=(--user 0:0)
 fi
 
 # Network mode
