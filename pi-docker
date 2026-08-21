@@ -12,6 +12,10 @@ PI_CONFIG_DIR="${HOME}/.pi/agent"
 PI_EXTENSIONS_DIR="${PI_EXTENSIONS_DIR:-${HOME}/pi-extensions}"
 PI_SKILLS_DIR="${PI_SKILLS_DIR:-${HOME}/pi-skills}"
 PI_LIFEOS_CONFIG_FILE="${PI_LIFEOS_CONFIG_FILE:-${PI_CONFIG_DIR}/pi-lifeos.json}"
+# USER subdirectories masked with an empty directory unless --with-private
+# is passed. No adapter code or shipped skill reads these, so hiding them
+# costs nothing on an ordinary run.
+PI_LIFEOS_PRIVATE_DIRS="${PI_LIFEOS_PRIVATE_DIRS:-FINANCES HEALTH}"
 
 usage() {
     cat <<'USAGE'
@@ -37,6 +41,9 @@ Options:
   --no-sandbox  Alias for --unrestricted
   --rootful     Use the root Docker daemon even when a rootless one is running.
                 Without this, a rootless daemon is preferred automatically.
+  --with-private
+                Expose the LifeOS USER subdirectories masked by default.
+                Pass this only for a session that genuinely needs them.
   --help        Show this help message
 
 Arguments:
@@ -50,6 +57,9 @@ Environment:
                       LifeOS adapter config (default: ~/.pi/agent/pi-lifeos.json).
                       When present, package/runtime/skills/USER paths are mounted
                       read-only at their host absolute paths automatically.
+  PI_LIFEOS_PRIVATE_DIRS
+                      Space-separated USER subdirectories masked unless
+                      --with-private is given (default: FINANCES HEALTH).
 
 Examples:
   pi-docker                           # Run in current directory
@@ -253,6 +263,7 @@ BUILD_FIRST=false
 HOST_APPS_MODE=false
 UNRESTRICTED_MODE=false
 USE_ROOTFUL=false
+WITH_PRIVATE=false
 EXTRA_PATHS=()
 PI_ARGS=()
 PARSING_PI_ARGS=false
@@ -279,6 +290,12 @@ while [ $# -gt 0 ]; do
             ;;
         --unrestricted|--no-sandbox)
             UNRESTRICTED_MODE=true
+            ;;
+        --rootful)
+            USE_ROOTFUL=true
+            ;;
+        --with-private)
+            WITH_PRIVATE=true
             ;;
         --tools)
             shift
@@ -420,6 +437,20 @@ if [ "$UNRESTRICTED_MODE" != true ] && [ -f "$PI_LIFEOS_CONFIG_FILE" ]; then
                 echo "Warning: LifeOS ${key} path is missing: ${lifeos_path}" >&2
             fi
         done
+        # Mask private subdirectories with an empty directory. The parent
+        # stays readable, so a skill walking USER/ sees an empty FINANCES
+        # rather than a missing path.
+        if [ "$WITH_PRIVATE" != true ]; then
+            lifeos_user="$(jq -r '.userRoot // empty' "$PI_LIFEOS_CONFIG_FILE")"
+            if [ -n "$lifeos_user" ] && [ -d "$lifeos_user" ]; then
+                mask_dir="${XDG_RUNTIME_DIR:-/tmp}/pi-sandbox-mask"
+                mkdir -p "$mask_dir"
+                for priv in $PI_LIFEOS_PRIVATE_DIRS; do
+                    [ -d "${lifeos_user}/${priv}" ] || continue
+                    DOCKER_ARGS+=(-v "${mask_dir}:${lifeos_user}/${priv}:ro")
+                done
+            fi
+        fi
         DOCKER_ARGS+=(
             -e "PI_LIFEOS_CONFIG=/home/pi/.pi/agent/pi-lifeos.json"
             -e "PI_LIFEOS_STATE_ROOT=/home/pi/.pi/agent/lifeos-state"
