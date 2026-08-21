@@ -13,9 +13,11 @@ PI_EXTENSIONS_DIR="${PI_EXTENSIONS_DIR:-${HOME}/pi-extensions}"
 PI_SKILLS_DIR="${PI_SKILLS_DIR:-${HOME}/pi-skills}"
 PI_LIFEOS_CONFIG_FILE="${PI_LIFEOS_CONFIG_FILE:-${PI_CONFIG_DIR}/pi-lifeos.json}"
 # USER subdirectories masked with an empty directory unless --with-private
-# is passed. No adapter code or shipped skill reads these, so hiding them
-# costs nothing on an ordinary run.
-PI_LIFEOS_PRIVATE_DIRS="${PI_LIFEOS_PRIVATE_DIRS:-FINANCES HEALTH}"
+# is passed. Nothing in the container reads them: the adapter never does, and
+# the skills that name these paths resolve them under ~/.claude, which has no
+# counterpart here. MEMORY/OBSERVABILITY is the bulk of the tree and holds a
+# running log of every tool call, so it is the one most worth withholding.
+PI_LIFEOS_PRIVATE_DIRS="${PI_LIFEOS_PRIVATE_DIRS:-FINANCES HEALTH MEMORY/OBSERVABILITY MEMORY/SECURITY MEMORY/UPGRADES MEMORY/VOICE}"
 
 usage() {
     cat <<'USAGE'
