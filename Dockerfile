@@ -16,6 +16,17 @@ RUN npm config set fund false && \
     npm install -g --prefix /opt/pi-agent @earendil-works/pi-coding-agent@0.84.2 && \
     npm cache clean --force
 
+# LifeOS ships its tooling as TypeScript run with bun, so the LifeOS adapter is
+# degraded without it. Not in Arch's repos; the npm package is a stub whose
+# postinstall fetches the real binary. That postinstall does not run under a
+# global root install, leaving a bun that exits 1 on every invocation, so it is
+# invoked explicitly here. The version check fails the build rather than
+# shipping a broken bun.
+RUN npm install -g --prefix /opt/pi-agent bun@1.4.0 && \
+    node /opt/pi-agent/lib/node_modules/bun/install.js && \
+    /opt/pi-agent/bin/bun --version && \
+    npm cache clean --force
+
 RUN useradd -m -s /bin/bash -u 1000 pi && \
     mkdir -p /home/pi/.pi/agent /home/pi/.npm-global /pi-npm-global /pi-npm-cache /workspace /repos && \
     chown -R pi:pi /home/pi /pi-npm-global /pi-npm-cache /workspace /repos && \
