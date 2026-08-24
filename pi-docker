@@ -10,7 +10,7 @@ IMAGE_NAME="pi-sandbox"
 ROOTLESS_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
 PI_CONFIG_DIR="${HOME}/.pi/agent"
 PI_EXTENSIONS_DIR="${PI_EXTENSIONS_DIR:-${HOME}/pi-extensions}"
-PI_SKILLS_DIR="${PI_SKILLS_DIR:-${HOME}/pi-skills}"
+PI_SKILLS_DIR="${PI_SKILLS_DIR:-${PI_CONFIG_DIR}/skills}"
 PI_LIFEOS_CONFIG_FILE="${PI_LIFEOS_CONFIG_FILE:-${PI_CONFIG_DIR}/pi-lifeos.json}"
 # USER subdirectories masked with an empty directory unless --with-private
 # is passed. Nothing in the container reads them: the adapter never does, and
@@ -54,7 +54,8 @@ Arguments:
 
 Environment:
   PI_EXTENSIONS_DIR   Extensions directory (default: ~/pi-extensions)
-  PI_SKILLS_DIR       Skills directory (default: ~/Documents/10-repos/11-gitRepo/my-skills/skills)
+  PI_SKILLS_DIR       Skills directory (default: ~/.pi/agent/skills). A symlink is
+                      resolved host-side, so the real tree lands in the container.
   PI_LIFEOS_CONFIG_FILE
                       LifeOS adapter config (default: ~/.pi/agent/pi-lifeos.json).
                       When present, package/runtime/skills/USER paths are mounted
