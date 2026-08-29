@@ -685,6 +685,13 @@ if [ "$HOST_APPS_MODE" = true ]; then
         [ -d "/usr/${sub}" ] && \
             DOCKER_ARGS+=(-v "/usr/${sub}:/usr/${sub}:ro")
     done
+
+    # systemd ships /etc/ssh/ssh_config.d/*.conf as symlinks into /usr/lib. With
+    # the host /usr overlaid they resolve to host-root-owned files, which a
+    # rootless user namespace maps to an uid it has no mapping for; ssh then
+    # refuses to read its own configuration and every SSH operation fails. A
+    # sandboxed client has no use for the host's drop-ins, so mask the directory.
+    DOCKER_ARGS+=(--tmpfs /etc/ssh/ssh_config.d:rw,nosuid,size=64k)
 fi
 
 # Security hardening (applied in all modes except login)
