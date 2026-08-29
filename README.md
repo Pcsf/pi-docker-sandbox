@@ -53,6 +53,8 @@ pi-docker --tools emacs ~/extra-repo   # Combine with other options
 pi-docker --host-apps                  # Full host application access (write jail)
 pi-docker --host-apps --local          # Host apps + local LLMs
 pi-docker --unrestricted               # Host-like access, no Docker sandboxing
+pi-docker --git                        # Clone, pull, commit and push as you
+pi-docker --git --gh                   # ...plus the GitHub API (pull requests, issues)
 pi-docker -- --provider anthropic      # Pass flags to PI after --
 ```
 
@@ -201,6 +203,45 @@ pi-docker --no-sandbox                 # alias
 
 **Important:** host `/opt` is available at `/host/opt`, not mounted over `/opt`, because the container's PI agent is installed under `/opt/pi-agent`. Mounting host `/opt` at `/opt` would hide the bundled PI executable before it can start.
 
+### Git and GitHub access (`--git`, `--gh`)
+
+Both are off by default. The sandbox exists to contain an agent that can be
+talked into things, and an agent that can push is an agent that can rewrite your
+repositories, so credentials are opted into per session rather than inherited
+from whatever the invoking shell happens to hold.
+
+```bash
+eval "$(ssh-agent -s)"          # if your session has no agent yet
+ssh-add -c ~/.ssh/id_ed25519    # -c prompts on the host for every use
+
+pi-docker --git                 # clone, pull, commit, push
+```
+
+`--git` forwards the **agent socket**, never a key file. The private key never
+enters the container, and the container can ask the host agent for signatures
+only while the session is alive, so nothing usable survives it. Your `user.name`
+and `user.email` are passed in as well, so commits are authored correctly, and
+`known_hosts` is mounted read-only with `StrictHostKeyChecking=yes` so a
+tampered DNS answer cannot redirect a push.
+
+Two ways to narrow what a session can reach:
+
+- **A dedicated key.** Register a second SSH key on your forge, load it into its
+  own agent, and point `PI_SSH_AUTH_SOCK` at that agent's socket. The session
+  then reaches only the repositories that key is authorised for, and the key can
+  be revoked without touching your everyday one.
+- **Per-use confirmation.** `ssh-add -c` makes each signature raise a prompt on
+  the host, so no push happens without you seeing it.
+
+`--gh` additionally exposes a GitHub API token (`PI_GH_TOKEN`, otherwise the one
+`gh auth token` returns) for pull requests and issues. It is a **separate flag
+because a token is a different kind of secret**: it sits in the container's
+environment where the agent can read and copy it, which is exactly what agent
+forwarding avoids. Only pass it when the session needs the API, and prefer a
+fine-grained token scoped to the repositories in play over a personal one. The
+token is handed to Docker by name rather than by value, so it does not appear in
+the command line that other processes on the host can read.
+
 ### Local LLMs (Ollama / LM Studio)
 
 Use the `--local` flag to enable host networking so the container can reach local LLM servers. This is required because servers like LM Studio typically bind to `127.0.0.1` only, which is unreachable from Docker's default bridge network.
@@ -297,3 +338,5 @@ Keep `~/.pi/agent/auth.json` and `models.json` — the container uses them.
 - Read-only root filesystem (`--read-only`)
 - tmpfs for `/tmp` (no persistent writes outside mounts)
 - No `--network host` in normal mode (only in `--login` mode)
+- No git or GitHub credentials unless `--git` / `--gh` is passed, and `--git`
+  forwards an agent socket rather than any key material

@@ -3,6 +3,7 @@ FROM archlinux:latest
 RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm --needed \
         nodejs npm git jq ripgrep ca-certificates \
+        openssh github-cli \
         octave && \
     pacman -Scc --noconfirm && \
     rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*

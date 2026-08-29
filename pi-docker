@@ -46,6 +46,14 @@ Options:
   --with-private
                 Expose the LifeOS USER subdirectories masked by default.
                 Pass this only for a session that genuinely needs them.
+  --git         Let the session use git as you: forwards the host SSH agent and
+                your git identity, so it can clone, pull, commit and push over
+                SSH. The private key itself never enters the container. Off by
+                default; requires a running SSH agent.
+  --gh          Additionally expose a GitHub API token (PI_GH_TOKEN, else the
+                gh CLI's) for pull requests and issues. Separate from --git
+                because a token is readable inside the container, unlike the
+                forwarded agent. Prefer a fine-grained, repo-scoped token.
   --help        Show this help message
 
 Arguments:
@@ -267,6 +275,8 @@ HOST_APPS_MODE=false
 UNRESTRICTED_MODE=false
 USE_ROOTFUL=false
 WITH_PRIVATE=false
+GIT_MODE=false
+GH_MODE=false
 EXTRA_PATHS=()
 PI_ARGS=()
 PARSING_PI_ARGS=false
@@ -299,6 +309,12 @@ while [ $# -gt 0 ]; do
             ;;
         --with-private)
             WITH_PRIVATE=true
+            ;;
+        --git)
+            GIT_MODE=true
+            ;;
+        --gh)
+            GH_MODE=true
             ;;
         --tools)
             shift
@@ -350,9 +366,16 @@ if [ "$BUILD_FIRST" = true ]; then
 fi
 
 # Select the daemon before any docker call, so build and run agree.
-ROOTLESS_DAEMON=false
 if [ "$USE_ROOTFUL" != true ] && [ -z "${DOCKER_HOST:-}" ] && [ -S "$ROOTLESS_SOCK" ]; then
     export DOCKER_HOST="unix://${ROOTLESS_SOCK}"
+fi
+
+# Ask the daemon rather than inferring from whether DOCKER_HOST was unset: the
+# variable may already point at a rootless socket, and every bind mount below
+# depends on knowing whether container uid 0 maps to the invoking user.
+ROOTLESS_DAEMON=false
+if docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null \
+        | grep -qx 'name=rootless'; then
     ROOTLESS_DAEMON=true
 fi
 
@@ -388,6 +411,84 @@ DOCKER_ARGS=(
     -w "${CONTAINER_WORKDIR}"
     -v "${WORKSPACE_MOUNT}"
 )
+
+# Git and GitHub credentials. Both are off by default: an agent that can push is
+# an agent that can rewrite your repositories, so access is opted into per
+# session rather than inherited from whatever the invoking shell happens to hold.
+#
+# --git forwards the SSH agent socket instead of any key file. The private key
+# never enters the container, and signatures are made by the host agent only for
+# the life of the session, so nothing usable survives the container. Point
+# PI_SSH_AUTH_SOCK at a dedicated agent holding a single forge key to narrow the
+# reachable repositories; `ssh-add -c` makes every use raise a host prompt.
+#
+# --gh additionally exposes an API token. Unlike the agent socket, a token is
+# readable inside the container and therefore exfiltratable, so it is a separate
+# opt-in and wants a fine-grained token rather than a personal one.
+if [ "$GIT_MODE" = true ] || [ "$GH_MODE" = true ]; then
+    GIT_IDENTITY_NAME="$(git config --get user.name 2>/dev/null || true)"
+    GIT_IDENTITY_EMAIL="$(git config --get user.email 2>/dev/null || true)"
+
+    if [ -z "$GIT_IDENTITY_NAME" ] || [ -z "$GIT_IDENTITY_EMAIL" ]; then
+        echo "Error: git user.name and user.email are unset on the host, so the" >&2
+        echo "       container cannot author a commit. Set them with git config --global." >&2
+        exit 1
+    fi
+
+    DOCKER_ARGS+=(
+        --env "GIT_AUTHOR_NAME=${GIT_IDENTITY_NAME}"
+        --env "GIT_AUTHOR_EMAIL=${GIT_IDENTITY_EMAIL}"
+        --env "GIT_COMMITTER_NAME=${GIT_IDENTITY_NAME}"
+        --env "GIT_COMMITTER_EMAIL=${GIT_IDENTITY_EMAIL}"
+    )
+fi
+
+if [ "$GIT_MODE" = true ]; then
+    GIT_AGENT_SOCK="${PI_SSH_AUTH_SOCK:-${SSH_AUTH_SOCK:-}}"
+    HOST_KNOWN_HOSTS="${HOME}/.ssh/known_hosts"
+
+    if [ -z "$GIT_AGENT_SOCK" ] || [ ! -S "$GIT_AGENT_SOCK" ]; then
+        echo "Error: --git needs a running SSH agent, but no agent socket was found." >&2
+        echo "       Start one and load a key:  eval \"\$(ssh-agent -s)\" && ssh-add -c ~/.ssh/<key>" >&2
+        echo "       Or set PI_SSH_AUTH_SOCK to the socket of a dedicated agent." >&2
+        exit 1
+    fi
+
+    if [ ! -f "$HOST_KNOWN_HOSTS" ]; then
+        echo "Error: --git needs ${HOST_KNOWN_HOSTS} to verify the remote's host key." >&2
+        exit 1
+    fi
+
+    if [ "$UNRESTRICTED_MODE" = true ]; then
+        # Host /run and the real home are already mounted at their own paths.
+        DOCKER_ARGS+=(--env "SSH_AUTH_SOCK=${GIT_AGENT_SOCK}")
+    else
+        DOCKER_ARGS+=(
+            --mount "type=bind,src=${GIT_AGENT_SOCK},dst=/run/host-ssh-agent"
+            --mount "type=bind,src=${HOST_KNOWN_HOSTS},dst=/run/host-known-hosts,readonly"
+            --env "SSH_AUTH_SOCK=/run/host-ssh-agent"
+            --env "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=/run/host-known-hosts -o StrictHostKeyChecking=yes"
+        )
+    fi
+fi
+
+if [ "$GH_MODE" = true ]; then
+    # Exported rather than passed by value: --env NAME reads the variable from
+    # this process, keeping the token out of the docker command line, which is
+    # readable by any other process on the host.
+    if [ -z "${PI_GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+        PI_GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+    fi
+
+    if [ -z "${PI_GH_TOKEN:-}" ]; then
+        echo "Error: --gh found no token. Set PI_GH_TOKEN to a fine-grained token" >&2
+        echo "       scoped to the repositories this session needs, or run gh auth login." >&2
+        exit 1
+    fi
+
+    export GH_TOKEN="${PI_GH_TOKEN}"
+    DOCKER_ARGS+=(--env GH_TOKEN)
+fi
 
 if [ "$UNRESTRICTED_MODE" = true ]; then
     HOST_USER_NAME="${USER:-$(id -un)}"
