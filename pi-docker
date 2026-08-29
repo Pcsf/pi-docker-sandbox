@@ -412,6 +412,15 @@ DOCKER_ARGS=(
     -v "${WORKSPACE_MOUNT}"
 )
 
+# Mask the ssh client drop-ins. Two of the host-access modes make this directory
+# resolve to host-root-owned files - --host-apps overlays /usr, which the
+# systemd-shipped symlinks point into, and --unrestricted binds /etc itself -
+# and a rootless user namespace has no mapping for that uid, so ssh refuses to
+# read its own configuration and every SSH operation dies before authenticating.
+# The container is only ever an SSH client, and /etc/ssh/ssh_config is untouched,
+# so nothing here is worth the failure mode.
+DOCKER_ARGS+=(--tmpfs /etc/ssh/ssh_config.d:rw,nosuid,size=64k)
+
 # Git and GitHub credentials. Both are off by default: an agent that can push is
 # an agent that can rewrite your repositories, so access is opted into per
 # session rather than inherited from whatever the invoking shell happens to hold.
@@ -460,8 +469,15 @@ if [ "$GIT_MODE" = true ]; then
     fi
 
     if [ "$UNRESTRICTED_MODE" = true ]; then
-        # Host /run and the real home are already mounted at their own paths.
-        DOCKER_ARGS+=(--env "SSH_AUTH_SOCK=${GIT_AGENT_SOCK}")
+        # Host /run and the real home are already mounted at their own paths, so
+        # both the socket and known_hosts are reachable unchanged. known_hosts
+        # still has to be named explicitly: ssh takes the home directory from the
+        # passwd entry rather than $HOME, and the uid this mode runs as is root
+        # there, whose /root is the host's and unreadable.
+        DOCKER_ARGS+=(
+            --env "SSH_AUTH_SOCK=${GIT_AGENT_SOCK}"
+            --env "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=${HOST_KNOWN_HOSTS} -o StrictHostKeyChecking=yes"
+        )
     else
         DOCKER_ARGS+=(
             --mount "type=bind,src=${GIT_AGENT_SOCK},dst=/run/host-ssh-agent"
@@ -493,9 +509,21 @@ fi
 if [ "$UNRESTRICTED_MODE" = true ]; then
     HOST_USER_NAME="${USER:-$(id -un)}"
     HOST_GROUP_ID="$(id -g)"
+
+    # Which uid is "you" depends on the daemon. A rootful one shares the host's
+    # uid space, so run as the real uid. A rootless one maps you to container
+    # uid 0 instead, and asking for your host uid there lands on an unmapped
+    # subuid that owns none of the bind-mounted files: host-owned paths read as
+    # another user's, writes fail, and an SSH agent socket cannot be opened.
+    if [ "$ROOTLESS_DAEMON" = true ]; then
+        CONTAINER_USER="0:0"
+    else
+        CONTAINER_USER="$(id -u):${HOST_GROUP_ID}"
+    fi
+
     DOCKER_ARGS+=(
         --privileged
-        --user "$(id -u):${HOST_GROUP_ID}"
+        --user "${CONTAINER_USER}"
         -e "HOME=${HOME}"
         -e "USER=${HOST_USER_NAME}"
         -e "LOGNAME=${HOST_USER_NAME}"
@@ -507,12 +535,22 @@ if [ "$UNRESTRICTED_MODE" = true ]; then
         -v pi-sandbox-unrestricted-npm-global:/pi-npm-global
         -v pi-sandbox-unrestricted-npm-cache:/pi-npm-cache
     )
-    for gid in $(id -G); do
-        [ "$gid" = "$HOST_GROUP_ID" ] && continue
-        DOCKER_ARGS+=(--group-add "$gid")
-    done
+    # Supplementary groups only mean something when the uid space is shared; a
+    # rootless namespace has no mapping for the host's gids.
+    if [ "$ROOTLESS_DAEMON" != true ]; then
+        for gid in $(id -G); do
+            [ "$gid" = "$HOST_GROUP_ID" ] && continue
+            DOCKER_ARGS+=(--group-add "$gid")
+        done
+    fi
+    # Plain recursive binds, not rslave. Rootless Docker starts rootlesskit with
+    # --copy-up=/etc --copy-up=/run, which replaces those two with private
+    # overlays in the daemon's mount namespace; asking to slave them makes the
+    # daemon refuse the container outright. Nothing is lost by dropping it here,
+    # because /host above is bound rslave and already carries a fully
+    # propagating view of the filesystem, late mounts included.
     for host_path in /etc /home /media /mnt /root /run /srv /tmp /usr /var; do
-        [ -e "$host_path" ] && DOCKER_ARGS+=(-v "${host_path}:${host_path}:rw,rslave")
+        [ -e "$host_path" ] && DOCKER_ARGS+=(-v "${host_path}:${host_path}:rw")
     done
 fi
 
@@ -685,13 +723,6 @@ if [ "$HOST_APPS_MODE" = true ]; then
         [ -d "/usr/${sub}" ] && \
             DOCKER_ARGS+=(-v "/usr/${sub}:/usr/${sub}:ro")
     done
-
-    # systemd ships /etc/ssh/ssh_config.d/*.conf as symlinks into /usr/lib. With
-    # the host /usr overlaid they resolve to host-root-owned files, which a
-    # rootless user namespace maps to an uid it has no mapping for; ssh then
-    # refuses to read its own configuration and every SSH operation fails. A
-    # sandboxed client has no use for the host's drop-ins, so mask the directory.
-    DOCKER_ARGS+=(--tmpfs /etc/ssh/ssh_config.d:rw,nosuid,size=64k)
 fi
 
 # Security hardening (applied in all modes except login)
