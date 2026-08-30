@@ -41,6 +41,11 @@ Options:
                 mounts at their normal paths, and host root at /host. Supersedes
                 --tools and --host-apps.
   --no-sandbox  Alias for --unrestricted
+  --lifeos-write
+                Mount the LifeOS personal data root read-write and open the
+                adapter's memory-mutation gate. The package, runtime and skills
+                roots stay read-only. Approved changes are still applied only
+                through the adapter's proposal review.
   --rootful     Use the root Docker daemon even when a rootless one is running.
                 Without this, a rootless daemon is preferred automatically.
   --with-private
@@ -274,6 +279,7 @@ BUILD_FIRST=false
 HOST_APPS_MODE=false
 UNRESTRICTED_MODE=false
 USE_ROOTFUL=false
+LIFEOS_WRITE=false
 WITH_PRIVATE=false
 GIT_MODE=false
 GH_MODE=false
@@ -309,6 +315,9 @@ while [ $# -gt 0 ]; do
             ;;
         --with-private)
             WITH_PRIVATE=true
+            ;;
+        --lifeos-write)
+            LIFEOS_WRITE=true
             ;;
         --git)
             GIT_MODE=true
@@ -574,7 +583,15 @@ if [ "$UNRESTRICTED_MODE" != true ] && [ -f "$PI_LIFEOS_CONFIG_FILE" ]; then
             lifeos_path="$(jq -r --arg key "$key" '.[$key] // empty' "$PI_LIFEOS_CONFIG_FILE")"
             [ -n "$lifeos_path" ] || continue
             if [ -e "$lifeos_path" ]; then
-                DOCKER_ARGS+=(-v "${lifeos_path}:${lifeos_path}:ro")
+                # --lifeos-write opens the personal data root only. The package,
+                # runtime and skills roots are a pinned payload and stay
+                # read-only in every mode, so a write cannot alter what the
+                # session was told its own rules are.
+                mount_mode=ro
+                if [ "$LIFEOS_WRITE" = true ] && [ "$key" = userRoot ]; then
+                    mount_mode=rw
+                fi
+                DOCKER_ARGS+=(-v "${lifeos_path}:${lifeos_path}:${mount_mode}")
             else
                 echo "Warning: LifeOS ${key} path is missing: ${lifeos_path}" >&2
             fi
@@ -597,6 +614,11 @@ if [ "$UNRESTRICTED_MODE" != true ] && [ -f "$PI_LIFEOS_CONFIG_FILE" ]; then
             -e "PI_LIFEOS_CONFIG=/home/pi/.pi/agent/pi-lifeos.json"
             -e "PI_LIFEOS_STATE_ROOT=/home/pi/.pi/agent/lifeos-state"
         )
+        # Two locks, both turned by the flag: the mount has to be writable and
+        # the adapter's own mutation gate has to be open.
+        if [ "$LIFEOS_WRITE" = true ]; then
+            DOCKER_ARGS+=(-e "PI_LIFEOS_MEMORY_MUTATION=1")
+        fi
     else
         echo "Warning: jq missing; LifeOS paths were not mounted" >&2
     fi
