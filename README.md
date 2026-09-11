@@ -21,7 +21,14 @@ A sandboxed Docker environment for the [PI coding agent](https://github.com/badl
 
 ```bash
 cd pi-sandbox
-docker build -t pi-sandbox .
+./pi-docker --build   # builds, then starts PI (exit with ctrl+c twice)
+```
+
+`pi-docker` uses a rootless Docker daemon whenever one is running, and `--build` builds on that same daemon. Do not build with `sudo docker build`: that puts the image on the root daemon, which `pi-docker` never reads, so it keeps running the old image. To run `docker` commands by hand against the rootless daemon, point the CLI at it once:
+
+```bash
+docker context create rootless --docker "host=unix://$XDG_RUNTIME_DIR/docker.sock"
+docker context use rootless
 ```
 
 ### 2. First-time OAuth login
@@ -313,9 +320,10 @@ Named volumes (`pi-sandbox-npm-global`, `pi-sandbox-npm-cache`) persist between 
 ## Updating PI
 
 1. Edit `Dockerfile` — change the version number in the `npm install -g @earendil-works/pi-coding-agent@…` line
-2. Rebuild: `pi-docker --build` or `docker build -t pi-sandbox .`
-3. Clear cached extensions: `docker volume rm pi-sandbox-npm-global pi-sandbox-npm-cache`
-4. First run after update will reinstall extensions into the volumes
+2. Rebuild: `pi-docker --build` (never `sudo docker build`, see [Build the image](#1-build-the-image))
+3. Confirm: `pi-docker --version` prints the new version
+4. Clear cached extensions: `docker volume rm pi-sandbox-npm-global pi-sandbox-npm-cache` (on the rootless daemon, if you use one)
+5. First run after update will reinstall extensions into the volumes
 
 Because the base image is `archlinux:latest` (rolling), a rebuild also refreshes the container's glibc and system libs. If a host binary starts failing with `GLIBC_x.xx not found` after a host system update, rerun `pi-docker --build` to resync.
 

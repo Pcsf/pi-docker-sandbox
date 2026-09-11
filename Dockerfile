@@ -14,7 +14,7 @@ RUN pacman -Syu --noconfirm && \
 RUN npm config set fund false && \
     npm config set update-notifier false && \
     npm config set loglevel error && \
-    npm install -g --prefix /opt/pi-agent @earendil-works/pi-coding-agent@0.84.2 && \
+    npm install -g --prefix /opt/pi-agent @earendil-works/pi-coding-agent@0.85.1 && \
     npm cache clean --force
 
 # LifeOS ships its tooling as TypeScript run with bun, so the LifeOS adapter is

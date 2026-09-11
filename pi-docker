@@ -367,16 +367,16 @@ if [ "$HOST_APPS_MODE" = true ] && [ -n "$TOOLS_LIST" ]; then
     TOOLS_LIST=""
 fi
 
+# Select the daemon before any docker call, so build and run agree.
+if [ "$USE_ROOTFUL" != true ] && [ -z "${DOCKER_HOST:-}" ] && [ -S "$ROOTLESS_SOCK" ]; then
+    export DOCKER_HOST="unix://${ROOTLESS_SOCK}"
+fi
+
 # Build if requested
 if [ "$BUILD_FIRST" = true ]; then
     SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
     echo "Building ${IMAGE_NAME}..."
     docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
-fi
-
-# Select the daemon before any docker call, so build and run agree.
-if [ "$USE_ROOTFUL" != true ] && [ -z "${DOCKER_HOST:-}" ] && [ -S "$ROOTLESS_SOCK" ]; then
-    export DOCKER_HOST="unix://${ROOTLESS_SOCK}"
 fi
 
 # Ask the daemon rather than inferring from whether DOCKER_HOST was unset: the
