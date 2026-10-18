@@ -12,6 +12,7 @@ A sandboxed Docker environment for the [PI coding agent](https://github.com/badl
 - **Local LLM support** — connect to Ollama/LM Studio on the host
 - **Host tool mounting** — expose simple host binaries (python, ghdl, emacs, …) to the container via `--tools`
 - **Unrestricted mode** — run with host-like access when you do not want Docker to be a sandbox
+- **FPGA toolchain jobs** - run Vivado/Quartus jobs in their own containers via `--fpga`, without exposing the Docker socket ([broker/README.md](broker/README.md))
 - **Extension development** — mount your extensions directory for seamless dev
 - **Arch-based base image** — matches the glibc/ABI of an Arch host, so mounted host binaries load without version skew
 
@@ -62,6 +63,7 @@ pi-docker --host-apps --local          # Host apps + local LLMs
 pi-docker --unrestricted               # Host-like access, no Docker sandboxing
 pi-docker --git                        # Clone, pull, commit and push as you
 pi-docker --git --gh                   # ...plus the GitHub API (pull requests, issues)
+pi-docker --host-apps --fpga           # + FPGA toolchain jobs through fpga-run
 pi-docker -- --provider anthropic      # Pass flags to PI after --
 ```
 
@@ -249,6 +251,15 @@ fine-grained token scoped to the repositories in play over a personal one. The
 token is handed to Docker by name rather than by value, so it does not appear in
 the command line that other processes on the host can read.
 
+### FPGA toolchain jobs (`--fpga`)
+
+Starts a per-session broker on the host and mounts its socket plus the
+`fpga-run` client. Inside the session, `fpga-run vivado -- make impl` runs the
+job through the launcher configured for that profile, in the current directory,
+and streams the log back. The broker refuses directories this session did not
+mount and options its config does not list; the Docker socket itself never
+enters the container. Setup and the config format: [broker/README.md](broker/README.md).
+
 ### Local LLMs (Ollama / LM Studio)
 
 Use the `--local` flag to enable host networking so the container can reach local LLM servers. This is required because servers like LM Studio typically bind to `127.0.0.1` only, which is unreachable from Docker's default bridge network.
@@ -312,6 +323,8 @@ ln -s "$(pwd)/pi-docker" ~/.local/bin/pi-docker
 | Host `/` — `--unrestricted` | `/host` | read-write | bind mount |
 | npm packages — `--unrestricted` | `/pi-npm-global/` | read-write | named volume |
 | npm cache — `--unrestricted` | `/pi-npm-cache/` | read-write | named volume |
+| Broker socket directory - `--fpga` | `/run/pi-broker/` | read-write | bind mount |
+| `broker/fpga-run.ts` - `--fpga` | `/usr/local/bin/fpga-run` | read-only | bind mount |
 | `/tmp` | `/tmp` | read-write | tmpfs |
 | `~/.cache` | `/home/pi/.cache/` | read-write | tmpfs |
 

@@ -46,6 +46,11 @@ Options:
                 adapter's memory-mutation gate. The package, runtime and skills
                 roots stay read-only. Approved changes are still applied only
                 through the adapter's proposal review.
+  --fpga        Start a per-session job broker so the session can run FPGA
+                toolchain jobs with fpga-run (see broker/README.md). The
+                Docker socket is never mounted: the broker runs only the
+                launchers configured in PI_BROKER_CONFIG, in directories this
+                session has mounted.
   --rootful     Use the root Docker daemon even when a rootless one is running.
                 Without this, a rootless daemon is preferred automatically.
   --with-private
@@ -283,6 +288,7 @@ LIFEOS_WRITE=false
 WITH_PRIVATE=false
 GIT_MODE=false
 GH_MODE=false
+FPGA_MODE=false
 EXTRA_PATHS=()
 PI_ARGS=()
 PARSING_PI_ARGS=false
@@ -325,6 +331,9 @@ while [ $# -gt 0 ]; do
         --gh)
             GH_MODE=true
             ;;
+        --fpga)
+            FPGA_MODE=true
+            ;;
         --tools)
             shift
             TOOLS_LIST="${1:-}"
@@ -359,6 +368,11 @@ if [ "$UNRESTRICTED_MODE" = true ]; then
         echo "Note: --unrestricted implies host filesystem access; ignoring --tools" >&2
         TOOLS_LIST=""
     fi
+fi
+
+if [ "$UNRESTRICTED_MODE" = true ] && [ "$FPGA_MODE" = true ]; then
+    echo "Note: --unrestricted already reaches the host; ignoring --fpga" >&2
+    FPGA_MODE=false
 fi
 
 # --host-apps supersedes --tools (it covers the same ground more broadly).
@@ -629,6 +643,8 @@ if [ "$UNRESTRICTED_MODE" != true ] && [ -d "${PI_EXTENSIONS_DIR}" ]; then
     DOCKER_ARGS+=(-v "${PI_EXTENSIONS_DIR}:/home/pi/.pi/agent/extensions")
 fi
 
+BROKER_MAPS=(--map "/workspace=${HOST_PWD}")
+
 # Mount extra paths under /repos/<basename>
 for extra in "${EXTRA_PATHS[@]}"; do
     abs_path="$(cd "$extra" && pwd)"
@@ -637,6 +653,7 @@ for extra in "${EXTRA_PATHS[@]}"; do
     else
         basename="$(basename "$abs_path")"
         DOCKER_ARGS+=(-v "${abs_path}:/repos/${basename}")
+        BROKER_MAPS+=(--map "/repos/${basename}=${abs_path}")
     fi
 done
 
@@ -780,6 +797,44 @@ else
     DOCKER_ARGS+=(--add-host=host.docker.internal:host-gateway)
 fi
 
+# --fpga: the broker lives exactly as long as this session. It is told the
+# container->host path map, so it refuses any directory not mounted here.
+if [ "$FPGA_MODE" = true ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+    BROKER_CONFIG="${PI_BROKER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/pi-sandbox/broker.json}"
+    BROKER_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/pi-sandbox/broker.log"
+    if ! command -v bun >/dev/null; then
+        echo "Error: --fpga needs bun on the host to run the broker." >&2
+        exit 1
+    fi
+    if [ ! -f "$BROKER_CONFIG" ]; then
+        echo "Error: --fpga needs a broker config at $BROKER_CONFIG (see broker/README.md)." >&2
+        exit 1
+    fi
+    mkdir -p "$(dirname "$BROKER_LOG")"
+    BROKER_DIR="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/pi-broker.XXXXXX")"
+    chmod 700 "$BROKER_DIR"
+    bun "$SCRIPT_DIR/broker/broker.ts" --socket "$BROKER_DIR/broker.sock" \
+        --config "$BROKER_CONFIG" --parent $$ "${BROKER_MAPS[@]}" 2>>"$BROKER_LOG" &
+    BROKER_PID=$!
+    trap 'kill "$BROKER_PID" 2>/dev/null; rm -rf "$BROKER_DIR"' EXIT
+    for _ in $(seq 50); do
+        [ -S "$BROKER_DIR/broker.sock" ] && break
+        kill -0 "$BROKER_PID" 2>/dev/null || break
+        sleep 0.1
+    done
+    if [ ! -S "$BROKER_DIR/broker.sock" ]; then
+        echo "Error: the FPGA broker did not start; see $BROKER_LOG" >&2
+        tail -n 5 "$BROKER_LOG" >&2
+        exit 1
+    fi
+    DOCKER_ARGS+=(
+        -v "$BROKER_DIR:/run/pi-broker"
+        -v "$SCRIPT_DIR/broker/fpga-run.ts:/usr/local/bin/fpga-run:ro"
+        -e "PI_BROKER_SOCK=/run/pi-broker/broker.sock"
+    )
+fi
+
 DOCKER_ARGS+=("${IMAGE_NAME}")
 
 # Append any PI arguments
@@ -787,4 +842,10 @@ if [ ${#PI_ARGS[@]} -gt 0 ]; then
     DOCKER_ARGS+=("${PI_ARGS[@]}")
 fi
 
-exec "${DOCKER_ARGS[@]}"
+if [ "$FPGA_MODE" != true ]; then
+    exec "${DOCKER_ARGS[@]}"
+fi
+# Not exec'd, so the EXIT trap can stop the broker when the session ends.
+set +e
+"${DOCKER_ARGS[@]}"
+exit $?
