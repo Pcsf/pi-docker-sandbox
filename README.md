@@ -112,6 +112,18 @@ Set the extensions directory (default is `~/pi-extensions`):
 export PI_EXTENSIONS_DIR=~/path/to/your/extensions
 ```
 
+### Global instructions
+
+List Markdown files in `PI_AGENT_RULES`, separated by colons, and pi-docker
+concatenates them into `~/.pi/agent/AGENTS.md` before every launch. Pi loads
+that file as user instructions in every session, so it always matches its
+sources. An `AGENTS.md` that pi-docker did not write is never replaced, and a
+source that cannot be read stops the launch.
+
+```bash
+export PI_AGENT_RULES=~/rules/agent.md:~/rules/style.md
+```
+
 ### Host Tools
 
 Mount host-installed tools into the container so the LLM can run them (e.g. to test code):
